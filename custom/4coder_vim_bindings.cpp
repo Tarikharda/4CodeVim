@@ -18,15 +18,26 @@
 #include <sys/socket.h>
 #include <sys/wait.h>
 #endif
+#include <time.h>
 
 #include "4coder_default_include.cpp"
 #include "4coder_fuzzy_search.cpp"
 #include "4coder_lsp.cpp"
+#include "4coder_git.cpp"
 #include "4coder_vim.cpp"
 
 #if !defined(META_PASS)
 #include "generated/managed_id_metadata.cpp"
 #endif
+
+// NOTE: Per frame work of the language server client and the git signs.
+function void
+vim_tick(Application_Links *app, Frame_Info frame_info){
+    default_tick(app, frame_info);
+    lsp_update(app);
+    git_update(app);
+    vim_apply_scrolloff(app);
+}
 
 void
 custom_layer_init(Application_Links *app){
@@ -53,6 +64,7 @@ custom_layer_init(Application_Links *app){
 
     // NOTE(lsp): jdtls for Java buffers
     lsp_init(app);
+    set_custom_hook(app, HookID_Tick, vim_tick);
 }
 
 #endif //FCODER_VIM_BINDINGS_CPP

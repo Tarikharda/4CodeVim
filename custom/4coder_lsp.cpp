@@ -37,6 +37,7 @@ struct Json_Value{
     Json_Kind kind;
     String_Const_u8 key;
     String_Const_u8 string;
+    String_Const_u8 raw;
     b32 boolean;
     Json_Value *first;
     Json_Value *last;
@@ -164,6 +165,7 @@ function Json_Value*
 json_parse_value(Json_Parser *parser){
     Json_Value *value = push_array_zero(parser->arena, Json_Value, 1);
     json_skip_whitespace(parser);
+    u64 start_pos = parser->pos;
     u8 c = json_peek(parser);
     switch (c){
         case '{': case '[':
@@ -247,6 +249,7 @@ json_parse_value(Json_Parser *parser){
             value->string = SCu8(parser->text.str + start, parser->pos - start);
         }break;
     }
+    value->raw = SCu8(parser->text.str + start_pos, clamp_bot(start_pos, parser->pos) - start_pos);
     return(value);
 }
 
@@ -546,6 +549,8 @@ lsp_spawn(char **argv, char *dir){
     }
     pid_t pid = fork();
     if (pid == 0){
+        // NOTE(lsp): Its own process group, so closing 4coder can stop java and its wrappers at once.
+        setpgid(0, 0);
         dup2(in_pair[1], 0);
         dup2(out_pipe[1], 1);
         i32 null_fd = open("/dev/null", O_WRONLY);
@@ -582,6 +587,7 @@ lsp_spawn(char **argv, char *dir){
 
 function void
 lsp_kill(Lsp_Connection *connection){
+    kill(-(pid_t)connection->pid, SIGTERM);
     kill((pid_t)connection->pid, SIGTERM);
     close(connection->in_fd);
 }
@@ -613,6 +619,7 @@ struct Lsp_Diagnostic{
     i64 line;
     i32 severity;
     String_Const_u8 message;
+    String_Const_u8 raw;
 };
 
 struct Lsp_Document{
@@ -623,6 +630,8 @@ struct Lsp_Document{
     i32 version;
     History_Record_Index synced_history;
     i64 synced_size;
+    String_Const_u8 synced_text;
+    u64 synced_cap;
     Arena diagnostic_arena;
     Lsp_Diagnostic *diagnostics;
     i32 diagnostic_count;
@@ -647,6 +656,7 @@ global Lsp_Pending lsp_pending[16] = {};
 global u8 lsp_status_space[96];
 global String_Const_u8 lsp_status = {};
 global u64 lsp_last_scan_time = 0;
+global b32 lsp_exit_handler_installed = false;
 
 global Arena lsp_hover_arena = {};
 global String_Const_u8 lsp_hover_text = {};
@@ -720,6 +730,28 @@ lsp_send_request(Application_Links *app, char *method, String_Const_u8 params){
     lsp_send(app, push_u8_stringf(scratch, "{\"jsonrpc\":\"2.0\",\"id\":%lld,\"method\":\"%s\",\"params\":%.*s}", id, method, string_expand(params)));
     return(id);
 }
+
+// NOTE(lsp): Runs when 4coder exits; stops this session's jdtls (and its java) right away
+// instead of leaving it to lsp-watchdog.
+function void
+lsp_on_exit(void){
+    if (lsp_connection != 0){
+        lsp_kill(lsp_connection);
+    }
+}
+
+#if OS_LINUX || OS_MAC
+// NOTE(lsp): Being killed or logged out skips atexit, so stop jdtls's process group first
+// and then die the way the signal would have.
+function void
+lsp_on_signal(i32 signal_number){
+    if (lsp_connection != 0){
+        kill(-(pid_t)lsp_connection->pid, SIGTERM);
+    }
+    signal(signal_number, SIG_DFL);
+    raise(signal_number);
+}
+#endif
 
 ////////////////////////////////
 // NOTE(lsp): jdtls setup
@@ -828,6 +860,8 @@ lsp_java_workspace(Arena *arena){
 function String_Const_u8
 lsp_java_settings(Application_Links *app, Arena *arena){
     List_String_Const_u8 parts = {};
+    // NOTE(lsp): jdtls keeps signature help off unless the client turns it on.
+    string_list_push(arena, &parts, string_u8_litexpr("\"signatureHelp\":{\"enabled\":true,\"description\":{\"enabled\":true}}"));
     String_Const_u8 user_name = def_get_config_string(arena, vars_save_string_lit("user_name"));
     if (user_name.size > 0 && !string_match(user_name, string_u8_litexpr("not-set"))){
         string_list_pushf(arena, &parts, "\"templates\":{\"typeComment\":[\"/**\",\" * ${tags}\",\" * @author %.*s\",\" */\"]}",
@@ -856,7 +890,7 @@ lsp_start_java(Application_Links *app, String_Const_u8 root){
     String_Const_u8 lombok = lsp_expand_home(scratch, string_u8_litexpr("~/.local/share/nvim/mason/share/jdtls/lombok.jar"));
     String_Const_u8 watchdog = lsp_expand_home(scratch, string_u8_litexpr("~/.config/nvim/bin/lsp-watchdog"));
 
-    char *argv[16] = {};
+    char *argv[32] = {};
     i32 argc = 0;
     if (lsp_is_executable(scratch, watchdog)){
         argv[argc++] = (char*)push_string_copy(scratch, watchdog).str;
@@ -865,6 +899,14 @@ lsp_start_java(Application_Links *app, String_Const_u8 root){
     if (file_exists(app, lombok)){
         argv[argc++] = (char*)push_u8_stringf(scratch, "--jvm-arg=-javaagent:%.*s", string_expand(lombok)).str;
     }
+    // NOTE(lsp): The JVM flags VS Code's Java extension starts jdtls with, tuned for startup
+    // and a responsive heap rather than throughput.
+    argv[argc++] = "--jvm-arg=-XX:+UseParallelGC";
+    argv[argc++] = "--jvm-arg=-XX:GCTimeRatio=4";
+    argv[argc++] = "--jvm-arg=-XX:AdaptiveSizePolicyWeight=90";
+    argv[argc++] = "--jvm-arg=-Dsun.zip.disableMemoryMapping=true";
+    argv[argc++] = "--jvm-arg=-Xms100m";
+    argv[argc++] = "--jvm-arg=-Xmx2G";
     argv[argc++] = "-configuration";
     argv[argc++] = (char*)push_u8_stringf(scratch, "%.*s/config", string_expand(workspace)).str;
     argv[argc++] = "-data";
@@ -878,6 +920,15 @@ lsp_start_java(Application_Links *app, String_Const_u8 root){
         return;
     }
     print_message(app, push_u8_stringf(scratch, "lsp: started %.*s for %.*s\n", string_expand(jdtls), string_expand(root)));
+    if (!lsp_exit_handler_installed){
+        lsp_exit_handler_installed = true;
+        atexit(lsp_on_exit);
+#if OS_LINUX || OS_MAC
+        signal(SIGTERM, lsp_on_signal);
+        signal(SIGINT, lsp_on_signal);
+        signal(SIGHUP, lsp_on_signal);
+#endif
+    }
     lsp_set_status(string_u8_litexpr("starting"));
 
     lsp_root_count = 0;
@@ -890,12 +941,25 @@ lsp_start_java(Application_Links *app, String_Const_u8 root){
                                              "{\"processId\":%d,\"rootUri\":\"%.*s\",\"rootPath\":\"%.*s\","
                                              "\"workspaceFolders\":[{\"uri\":\"%.*s\",\"name\":\"%.*s\"}],"
                                              "\"capabilities\":{"
-                                             "\"workspace\":{\"workspaceFolders\":true,\"configuration\":true},"
+                                             "\"workspace\":{\"workspaceFolders\":true,\"configuration\":true,\"applyEdit\":true,"
+                                             "\"workspaceEdit\":{\"documentChanges\":true},\"symbol\":{}},"
                                              "\"textDocument\":{"
                                              "\"synchronization\":{\"didSave\":false},"
+                                             "\"completion\":{\"contextSupport\":true,\"completionItem\":{\"snippetSupport\":true,"
+                                             "\"resolveSupport\":{\"properties\":[\"documentation\",\"detail\",\"additionalTextEdits\"]}}},"
+                                             "\"signatureHelp\":{\"signatureInformation\":{\"parameterInformation\":{\"labelOffsetSupport\":true}}},"
                                              "\"hover\":{\"contentFormat\":[\"markdown\",\"plaintext\"]},"
                                              "\"definition\":{\"linkSupport\":true},"
+                                             "\"declaration\":{\"linkSupport\":true},"
+                                             "\"implementation\":{\"linkSupport\":true},"
+                                             "\"typeDefinition\":{\"linkSupport\":true},"
                                              "\"references\":{},"
+                                             "\"rename\":{},"
+                                             "\"formatting\":{},"
+                                             "\"documentSymbol\":{\"hierarchicalDocumentSymbolSupport\":true},"
+                                             "\"codeAction\":{\"codeActionLiteralSupport\":{\"codeActionKind\":{\"valueSet\":"
+                                             "[\"quickfix\",\"refactor\",\"refactor.extract\",\"refactor.inline\",\"refactor.rewrite\","
+                                             "\"source\",\"source.organizeImports\"]}}},"
                                              "\"publishDiagnostics\":{\"relatedInformation\":false}}},"
                                              "\"initializationOptions\":{\"settings\":{\"java\":%.*s},"
                                              "\"extendedClientCapabilities\":{\"classFileContentsSupport\":true}}}",
@@ -924,6 +988,8 @@ lsp_add_root(Application_Links *app, String_Const_u8 root){
     }
 }
 
+function void lsp_document_store_text(Lsp_Document *doc, String_Const_u8 text);
+
 function void
 lsp_open_document(Application_Links *app, Buffer_ID buffer){
     Scratch_Block scratch(app);
@@ -941,11 +1007,50 @@ lsp_open_document(Application_Links *app, Buffer_ID buffer){
     sll_stack_push(lsp_first_document, doc);
 
     String_Const_u8 text = push_whole_buffer(app, scratch, buffer);
+    lsp_document_store_text(doc, text);
     lsp_notify(app, "textDocument/didOpen",
                push_u8_stringf(scratch, "{\"textDocument\":{\"uri\":\"%.*s\",\"languageId\":\"java\",\"version\":1,\"text\":\"%.*s\"}}",
                                string_expand(json_escape(scratch, doc->uri)), string_expand(json_escape(scratch, text))));
 }
 
+function void
+lsp_document_store_text(Lsp_Document *doc, String_Const_u8 text){
+    if (text.size > doc->synced_cap){
+        Base_Allocator *allocator = get_base_allocator_system();
+        if (doc->synced_text.str != 0){
+            base_free(allocator, doc->synced_text.str);
+        }
+        String_Const_u8 memory = base_allocate(allocator, clamp_bot(KB(4), text.size*2));
+        doc->synced_text.str = memory.str;
+        doc->synced_cap = memory.size;
+    }
+    block_copy(doc->synced_text.str, text.str, text.size);
+    doc->synced_text.size = text.size;
+}
+
+// NOTE(lsp): Line and UTF-16 column of a byte offset in a copy of the text.
+function void
+lsp_position_in_text(String_Const_u8 text, u64 offset, i64 *line_out, i64 *character_out){
+    i64 line = 0;
+    u64 line_start = 0;
+    for (u64 i = 0; i < offset; i += 1){
+        if (text.str[i] == '\n'){
+            line += 1;
+            line_start = i + 1;
+        }
+    }
+    i64 units = 0;
+    for (u64 i = line_start; i < offset;){
+        Character_Consume_Result consume = utf8_consume(text.str + i, offset - i);
+        units += (consume.codepoint >= 0x10000)?2:1;
+        i += clamp_bot(1, consume.inc);
+    }
+    *line_out = line;
+    *character_out = units;
+}
+
+// NOTE(lsp): Sends only the region between the common prefix and suffix of the old and
+// new text, so typing in a large file costs a few bytes instead of the whole file.
 function void
 lsp_sync_document(Application_Links *app, Lsp_Document *doc){
     History_Record_Index history = buffer_history_get_current_state_index(app, doc->buffer);
@@ -954,12 +1059,38 @@ lsp_sync_document(Application_Links *app, Lsp_Document *doc){
         Scratch_Block scratch(app);
         doc->synced_history = history;
         doc->synced_size = size;
-        doc->version += 1;
         String_Const_u8 text = push_whole_buffer(app, scratch, doc->buffer);
+        String_Const_u8 old = doc->synced_text;
+        u64 prefix = 0;
+        u64 max_prefix = Min(old.size, text.size);
+        for (;prefix < max_prefix && old.str[prefix] == text.str[prefix]; prefix += 1);
+        // NOTE(lsp): Keep the split on a UTF-8 character boundary.
+        for (;prefix > 0 && (old.str[prefix] & 0xC0) == 0x80; prefix -= 1);
+        u64 suffix = 0;
+        for (;suffix < old.size - prefix && suffix < text.size - prefix &&
+             old.str[old.size - 1 - suffix] == text.str[text.size - 1 - suffix]; suffix += 1);
+        for (;suffix > 0 && (old.str[old.size - suffix] & 0xC0) == 0x80; suffix -= 1);
+        if (prefix == old.size && prefix == text.size){
+            return;
+        }
+        
+        i64 start_line = 0;
+        i64 start_character = 0;
+        i64 end_line = 0;
+        i64 end_character = 0;
+        lsp_position_in_text(old, prefix, &start_line, &start_character);
+        lsp_position_in_text(old, old.size - suffix, &end_line, &end_character);
+        String_Const_u8 inserted = SCu8(text.str + prefix, text.size - suffix - prefix);
+        
+        doc->version += 1;
         lsp_notify(app, "textDocument/didChange",
-                   push_u8_stringf(scratch, "{\"textDocument\":{\"uri\":\"%.*s\",\"version\":%d},\"contentChanges\":[{\"text\":\"%.*s\"}]}",
+                   push_u8_stringf(scratch, "{\"textDocument\":{\"uri\":\"%.*s\",\"version\":%d},\"contentChanges\":[{"
+                                   "\"range\":{\"start\":{\"line\":%lld,\"character\":%lld},\"end\":{\"line\":%lld,\"character\":%lld}},"
+                                   "\"text\":\"%.*s\"}]}",
                                    string_expand(json_escape(scratch, doc->uri)), doc->version,
-                                   string_expand(json_escape(scratch, text))));
+                                   start_line, start_character, end_line, end_character,
+                                   string_expand(json_escape(scratch, inserted))));
+        lsp_document_store_text(doc, text);
     }
 }
 
@@ -967,6 +1098,9 @@ function void
 lsp_reset_documents(void){
     for (Lsp_Document *doc = lsp_first_document; doc != 0; doc = doc->next){
         linalloc_clear(&doc->diagnostic_arena);
+        if (doc->synced_text.str != 0){
+            base_free(get_base_allocator_system(), doc->synced_text.str);
+        }
     }
     lsp_first_document = 0;
     lsp_root_count = 0;
@@ -982,6 +1116,9 @@ lsp_scan_buffers(Application_Links *app){
             lsp_notify(app, "textDocument/didClose",
                        push_u8_stringf(scratch, "{\"textDocument\":{\"uri\":\"%.*s\"}}", string_expand(json_escape(scratch, doc->uri))));
             linalloc_clear(&doc->diagnostic_arena);
+            if (doc->synced_text.str != 0){
+                base_free(get_base_allocator_system(), doc->synced_text.str);
+            }
             *ptr = doc->next;
         }
         else{
@@ -1037,8 +1174,12 @@ lsp_handle_diagnostics(Application_Links *app, Json_Value *params){
             diagnostic->severity = 1;
         }
         diagnostic->message = push_string_copy(&doc->diagnostic_arena, json_get(item, "message")->string);
+        diagnostic->raw = push_string_copy(&doc->diagnostic_arena, item->raw);
     }
 }
+
+function i32 lsp_apply_workspace_edit(Application_Links *app, Json_Value *edit);
+function b32 lsp_handle_async_response(Application_Links *app, i64 id, Json_Value *json);
 
 // NOTE(lsp): Requests from the server must be answered or jdtls may wait on them forever.
 function void
@@ -1062,7 +1203,8 @@ lsp_answer_server_request(Application_Links *app, Json_Value *message){
         result = push_u8_stringf(scratch, "[%.*s]", string_expand(string_list_flatten(scratch, items, 0, string_u8_litexpr(","), 0, StringFill_NoTerminate)));
     }
     else if (string_match(method, string_u8_litexpr("workspace/applyEdit"))){
-        result = string_u8_litexpr("{\"applied\":false}");
+        lsp_apply_workspace_edit(app, json_get(json_get(message, "params"), "edit"));
+        result = string_u8_litexpr("{\"applied\":true}");
     }
     lsp_send(app, push_u8_stringf(scratch, "{\"jsonrpc\":\"2.0\",\"id\":%.*s,\"result\":%.*s}", string_expand(id), string_expand(result)));
 }
@@ -1105,7 +1247,10 @@ lsp_handle_message(Application_Links *app, Lsp_Message *message){
                        push_u8_stringf(scratch, "{\"settings\":{\"java\":%.*s}}", string_expand(lsp_java_settings(app, scratch))));
             lsp_scan_buffers(app);
         }
-        for (i32 i = 0; i < ArrayCount(lsp_pending); i += 1){
+        if (lsp_handle_async_response(app, id_number, json)){
+            id_number = 0;
+        }
+        for (i32 i = 0; id_number != 0 && i < ArrayCount(lsp_pending); i += 1){
             if (lsp_pending[i].id == id_number && !lsp_pending[i].done){
                 lsp_pending[i].done = true;
                 lsp_pending[i].response = message;
@@ -1119,6 +1264,8 @@ lsp_handle_message(Application_Links *app, Lsp_Message *message){
         base_free(get_base_allocator_system(), message);
     }
 }
+
+function void lsp_update_popups(Application_Links *app, View_ID active_view);
 
 function void
 lsp_update(Application_Links *app){
@@ -1158,18 +1305,13 @@ lsp_update(Application_Links *app){
         }
     }
 
+    View_ID active_view = get_active_view(app, Access_Always);
     if (lsp_hover_text.size > 0){
-        View_ID view = get_active_view(app, Access_Always);
-        if (view != lsp_hover_view || view_get_cursor_pos(app, view) != lsp_hover_pos){
+        if (active_view != lsp_hover_view || view_get_cursor_pos(app, active_view) != lsp_hover_pos){
             lsp_hover_text = string_u8_empty;
         }
     }
-}
-
-function void
-lsp_tick(Application_Links *app, Frame_Info frame_info){
-    default_tick(app, frame_info);
-    lsp_update(app);
+    lsp_update_popups(app, active_view);
 }
 
 ////////////////////////////////
@@ -1442,41 +1584,6 @@ lsp_hover_string(Arena *arena, Json_Value *contents){
 ////////////////////////////////
 // NOTE(lsp): Commands
 
-CUSTOM_UI_COMMAND_SIG(lsp_goto_definition)
-CUSTOM_DOC("Jumps to the definition of the symbol under the cursor using the language server, or the code index outside Java files.")
-{
-    View_ID view = 0;
-    Buffer_ID buffer = 0;
-    Lsp_Document *doc = lsp_active_document(app, &view, &buffer);
-    if (doc == 0){
-        jump_to_definition_at_cursor(app);
-        return;
-    }
-    Scratch_Block scratch(app);
-    String_Const_u8 params = lsp_text_document_position(app, scratch, buffer, doc->uri, view_get_cursor_pos(app, view));
-    Json_Value *result = lsp_request(app, scratch, "textDocument/definition", params);
-    if (result == 0){
-        return;
-    }
-    if (result->kind == JsonKind_Object){
-        lsp_jump_to_location(app, view, lsp_location_from_json(result));
-    }
-    else if (result->kind == JsonKind_Array && result->count == 1){
-        lsp_jump_to_location(app, view, lsp_location_from_json(result->first));
-    }
-    else if (result->kind == JsonKind_Array && result->count > 1){
-        Lsp_Location *locations = push_array(scratch, Lsp_Location, result->count);
-        i32 count = 0;
-        for (Json_Value *item = result->first; item != 0; item = item->next){
-            locations[count++] = lsp_location_from_json(item);
-        }
-        lsp_choose_location(app, view, locations, count, string_u8_litexpr("Definitions:"));
-    }
-    else{
-        print_message(app, string_u8_litexpr("lsp: no definition found\n"));
-    }
-}
-
 CUSTOM_UI_COMMAND_SIG(lsp_find_references)
 CUSTOM_DOC("Lists the references to the symbol under the cursor using the language server, or all locations of the identifier outside Java files.")
 {
@@ -1522,57 +1629,6 @@ CUSTOM_DOC("Shows the language server's documentation for the symbol under the c
             lsp_show_popup(app, view, text);
         }
     }
-}
-
-function void
-lsp_goto_diagnostic(Application_Links *app, b32 forward){
-    View_ID view = 0;
-    Buffer_ID buffer = 0;
-    Lsp_Document *doc = lsp_active_document(app, &view, &buffer);
-    if (doc == 0 || doc->diagnostic_count == 0){
-        print_message(app, string_u8_litexpr("lsp: no diagnostics\n"));
-        return;
-    }
-    i64 pos = view_get_cursor_pos(app, view);
-    Lsp_Diagnostic *best = 0;
-    Lsp_Diagnostic *wrap = 0;
-    for (i32 i = 0; i < doc->diagnostic_count; i += 1){
-        Lsp_Diagnostic *d = &doc->diagnostics[i];
-        i64 start = d->range.min;
-        if (forward){
-            if (start > pos && (best == 0 || start < best->range.min)){
-                best = d;
-            }
-            if (wrap == 0 || start < wrap->range.min){
-                wrap = d;
-            }
-        }
-        else{
-            if (start < pos && (best == 0 || start > best->range.min)){
-                best = d;
-            }
-            if (wrap == 0 || start > wrap->range.min){
-                wrap = d;
-            }
-        }
-    }
-    if (best == 0){
-        best = wrap;
-    }
-    view_set_cursor_and_preferred_x(app, view, seek_pos(best->range.min));
-    lsp_show_popup(app, view, best->message);
-}
-
-CUSTOM_COMMAND_SIG(lsp_next_diagnostic)
-CUSTOM_DOC("Moves to the next error or warning reported by the language server and shows its message.")
-{
-    lsp_goto_diagnostic(app, true);
-}
-
-CUSTOM_COMMAND_SIG(lsp_prev_diagnostic)
-CUSTOM_DOC("Moves to the previous error or warning reported by the language server and shows its message.")
-{
-    lsp_goto_diagnostic(app, false);
 }
 
 CUSTOM_UI_COMMAND_SIG(lsp_list_diagnostics)
@@ -1626,6 +1682,1198 @@ CUSTOM_DOC("Stops the Java language server and starts it again for the open Java
     lsp_reset_documents();
     lsp_set_status(string_u8_empty);
     lsp_scan_buffers(app);
+}
+
+////////////////////////////////
+// NOTE(lsp): Text edits
+
+struct Lsp_Edit{
+    Range_i64 range;
+    String_Const_u8 text;
+};
+
+function Range_i64
+lsp_range_from_json(Application_Links *app, Buffer_ID buffer, Json_Value *range){
+    Json_Value *start = json_get(range, "start");
+    Json_Value *end = json_get(range, "end");
+    return(Ii64(lsp_pos_from_position(app, buffer, json_i64(json_get(start, "line")), json_i64(json_get(start, "character"))),
+                lsp_pos_from_position(app, buffer, json_i64(json_get(end, "line")), json_i64(json_get(end, "character")))));
+}
+
+function i32
+lsp_collect_edits(Application_Links *app, Buffer_ID buffer, Json_Value *edits, Lsp_Edit *out, i32 max){
+    i32 count = 0;
+    for (Json_Value *edit = edits->first; edit != 0 && count < max; edit = edit->next){
+        out[count].range = lsp_range_from_json(app, buffer, json_get(edit, "range"));
+        out[count].text = json_get(edit, "newText")->string;
+        count += 1;
+    }
+    return(count);
+}
+
+// NOTE(lsp): Applies edits given in positions of the unedited buffer as one batch, which is
+// also a single undo step.
+function void
+lsp_apply_edits(Application_Links *app, Buffer_ID buffer, Lsp_Edit *edits, i32 count){
+    Scratch_Block scratch(app);
+    for (i32 i = 1; i < count; i += 1){
+        Lsp_Edit edit = edits[i];
+        i32 j = i;
+        for (;j > 0 && edits[j - 1].range.min > edit.range.min; j -= 1){
+            edits[j] = edits[j - 1];
+        }
+        edits[j] = edit;
+    }
+    Batch_Edit *first = 0;
+    Batch_Edit *last = 0;
+    for (i32 i = 0; i < count; i += 1){
+        Batch_Edit *batch = push_array_zero(scratch, Batch_Edit, 1);
+        batch->edit.text = edits[i].text;
+        batch->edit.range = edits[i].range;
+        sll_queue_push(first, last, batch);
+    }
+    if (first != 0){
+        buffer_batch_edit(app, buffer, first);
+    }
+}
+
+function i32
+lsp_apply_uri_edits(Application_Links *app, String_Const_u8 uri, Json_Value *edits){
+    Scratch_Block scratch(app);
+    String_Const_u8 path = lsp_path_from_uri(scratch, uri);
+    Buffer_ID buffer = get_buffer_by_file_name(app, path, Access_Always);
+    if (buffer == 0){
+        buffer = create_buffer(app, path, BufferCreate_NeverNew);
+    }
+    i32 count = 0;
+    if (buffer != 0 && edits->count > 0){
+        Lsp_Edit *list = push_array(scratch, Lsp_Edit, edits->count);
+        count = lsp_collect_edits(app, buffer, edits, list, edits->count);
+        lsp_apply_edits(app, buffer, list, count);
+    }
+    return(count);
+}
+
+function i32
+lsp_apply_workspace_edit(Application_Links *app, Json_Value *edit){
+    i32 total = 0;
+    Json_Value *changes = json_get(edit, "changes");
+    for (Json_Value *file = changes->first; file != 0; file = file->next){
+        total += lsp_apply_uri_edits(app, file->key, file);
+    }
+    Json_Value *document_changes = json_get(edit, "documentChanges");
+    for (Json_Value *change = document_changes->first; change != 0; change = change->next){
+        Json_Value *text_document = json_get(change, "textDocument");
+        if (text_document->kind == JsonKind_Object){
+            total += lsp_apply_uri_edits(app, json_get(text_document, "uri")->string, json_get(change, "edits"));
+        }
+        else{
+            print_message(app, string_u8_litexpr("lsp: creating, renaming or deleting files from an edit is not supported\n"));
+        }
+    }
+    return(total);
+}
+
+////////////////////////////////
+// NOTE(lsp): Kinds
+
+global char *lsp_kind_names[] = {
+    "", "text", "method", "function", "ctor", "field", "var", "class", "iface", "module",
+    "prop", "unit", "value", "enum", "keyword", "snippet", "color", "file", "ref", "folder",
+    "member", "const", "struct", "event", "op", "type",
+};
+
+global char *lsp_symbol_kind_names[] = {
+    "", "file", "module", "namespace", "package", "class", "method", "property", "field",
+    "ctor", "enum", "iface", "function", "var", "const", "string", "number", "bool",
+    "array", "object", "key", "null", "member", "struct", "event", "op", "type",
+};
+
+function char*
+lsp_kind_name(char **names, i32 count, i64 kind){
+    char *result = names[0];
+    if (0 <= kind && kind < count){
+        result = names[kind];
+    }
+    return(result);
+}
+
+function b32
+lsp_is_identifier_char(u8 c){
+    return(character_is_alpha_numeric(c) || c == '_' || c == '$' || c >= 128);
+}
+
+////////////////////////////////
+// NOTE(lsp): Snippets
+
+// NOTE(lsp): After accepting a snippet the cursor sits on its first placeholder. Typing
+// replaces the placeholder text and Tab moves to the next one. The stops are buffer
+// markers, so they follow the edits made while filling them in.
+
+struct Lsp_Snippet_Stop{
+    i32 number;
+    u64 start;
+    u64 end;
+};
+
+global Managed_Object lsp_snippet_markers = 0;
+global Buffer_ID lsp_snippet_buffer = 0;
+global i32 lsp_snippet_count = 0;
+global i32 lsp_snippet_index = 0;
+global b32 lsp_snippet_pending_replace = false;
+
+function u64
+lsp_snippet_copy_text(u8 *out, u64 size, String_Const_u8 text){
+    for (u64 i = 0; i < text.size; i += 1){
+        u8 c = text.str[i];
+        if (c == '\\' && i + 1 < text.size){
+            out[size++] = text.str[i + 1];
+            i += 1;
+        }
+        else if (c == '$' && i + 1 < text.size && text.str[i + 1] == '{'){
+            // NOTE(lsp): Nested placeholders keep only their text.
+            u64 j = i + 2;
+            for (;j < text.size && character_is_base10(text.str[j]); j += 1);
+            if (j < text.size && (text.str[j] == ':' || text.str[j] == '|')){
+                j += 1;
+            }
+            i32 depth = 1;
+            u64 inner_start = j;
+            for (;j < text.size; j += 1){
+                if (text.str[j] == '{'){
+                    depth += 1;
+                }
+                else if (text.str[j] == '}'){
+                    depth -= 1;
+                    if (depth == 0){
+                        break;
+                    }
+                }
+            }
+            size = lsp_snippet_copy_text(out, size, SCu8(text.str + inner_start, j - inner_start));
+            i = j;
+        }
+        else if (c == '$' && i + 1 < text.size && character_is_base10(text.str[i + 1])){
+            for (;i + 1 < text.size && character_is_base10(text.str[i + 1]); i += 1);
+        }
+        else{
+            out[size++] = c;
+        }
+    }
+    return(size);
+}
+
+// NOTE(lsp): Expands ${1:text}, ${1|a,b|}, $1 and $0 into plain text plus stop ranges.
+function String_Const_u8
+lsp_snippet_expand(Arena *arena, String_Const_u8 snippet, Lsp_Snippet_Stop *stops, i32 *stop_count, i32 max_stops){
+    u8 *out = push_array(arena, u8, snippet.size + 1);
+    u64 size = 0;
+    i32 count = 0;
+    for (u64 i = 0; i < snippet.size; i += 1){
+        u8 c = snippet.str[i];
+        if (c == '\\' && i + 1 < snippet.size){
+            out[size++] = snippet.str[i + 1];
+            i += 1;
+        }
+        else if (c == '$' && i + 1 < snippet.size && (snippet.str[i + 1] == '{' || character_is_base10(snippet.str[i + 1]))){
+            b32 braced = (snippet.str[i + 1] == '{');
+            u64 j = i + (braced?2:1);
+            u64 number_start = j;
+            for (;j < snippet.size && character_is_base10(snippet.str[j]); j += 1);
+            i32 number = (i32)string_to_integer(SCu8(snippet.str + number_start, j - number_start), 10);
+            u64 stop_start = size;
+            if (braced){
+                b32 choice = (j < snippet.size && snippet.str[j] == '|');
+                if (j < snippet.size && (snippet.str[j] == ':' || choice)){
+                    j += 1;
+                }
+                i32 depth = 1;
+                u64 inner_start = j;
+                for (;j < snippet.size; j += 1){
+                    if (snippet.str[j] == '{'){
+                        depth += 1;
+                    }
+                    else if (snippet.str[j] == '}'){
+                        depth -= 1;
+                        if (depth == 0){
+                            break;
+                        }
+                    }
+                }
+                String_Const_u8 inner = SCu8(snippet.str + inner_start, j - inner_start);
+                if (choice){
+                    inner = string_prefix(inner, string_find_first(inner, ','));
+                    if (inner.size > 0 && inner.str[inner.size - 1] == '|'){
+                        inner = string_chop(inner, 1);
+                    }
+                }
+                size = lsp_snippet_copy_text(out, size, inner);
+                i = j;
+            }
+            else{
+                i = j - 1;
+            }
+            b32 seen = false;
+            for (i32 k = 0; k < count; k += 1){
+                if (stops[k].number == number){
+                    seen = true;
+                }
+            }
+            if (!seen && count < max_stops){
+                stops[count].number = number;
+                stops[count].start = stop_start;
+                stops[count].end = size;
+                count += 1;
+            }
+        }
+        else{
+            out[size++] = c;
+        }
+    }
+    // NOTE(lsp): Without an explicit $0 the end of the snippet is the final stop, so Tab
+    // after the last placeholder leaves it, e.g. past the ) of a method call.
+    b32 has_final = false;
+    for (i32 k = 0; k < count; k += 1){
+        if (stops[k].number == 0){
+            has_final = true;
+        }
+    }
+    if (!has_final && count < max_stops){
+        stops[count].number = 0;
+        stops[count].start = size;
+        stops[count].end = size;
+        count += 1;
+    }
+    // NOTE(lsp): Visit stops in number order with $0 last.
+    for (i32 a = 1; a < count; a += 1){
+        Lsp_Snippet_Stop stop = stops[a];
+        i32 key = (stop.number == 0)?max_i32:stop.number;
+        i32 b = a;
+        for (;b > 0 && ((stops[b - 1].number == 0)?max_i32:stops[b - 1].number) > key; b -= 1){
+            stops[b] = stops[b - 1];
+        }
+        stops[b] = stop;
+    }
+    *stop_count = count;
+    return(SCu8(out, size));
+}
+
+function void
+lsp_snippet_close(Application_Links *app){
+    if (lsp_snippet_markers != 0){
+        managed_object_free(app, lsp_snippet_markers);
+    }
+    lsp_snippet_markers = 0;
+    lsp_snippet_count = 0;
+    lsp_snippet_pending_replace = false;
+}
+
+function b32
+lsp_snippet_stop_range(Application_Links *app, i32 index, Range_i64 *out){
+    Marker markers[2] = {};
+    b32 result = (lsp_snippet_markers != 0 &&
+                  managed_object_load_data(app, lsp_snippet_markers, index*2, 2, markers));
+    if (result){
+        *out = Ii64(markers[0].pos, markers[1].pos);
+    }
+    return(result);
+}
+
+function void
+lsp_snippet_select(Application_Links *app, View_ID view, i32 index){
+    Range_i64 range = {};
+    if (lsp_snippet_stop_range(app, index, &range)){
+        lsp_snippet_index = index;
+        view_set_cursor_and_preferred_x(app, view, seek_pos(range.min));
+        lsp_snippet_pending_replace = (range.max > range.min);
+    }
+}
+
+function void
+lsp_snippet_begin(Application_Links *app, View_ID view, Buffer_ID buffer, i64 base, Lsp_Snippet_Stop *stops, i32 count){
+    lsp_snippet_close(app);
+    if (count == 0){
+        return;
+    }
+    lsp_snippet_markers = alloc_buffer_markers_on_buffer(app, buffer, count*2, 0);
+    Scratch_Block scratch(app);
+    Marker *markers = push_array_zero(scratch, Marker, count*2);
+    for (i32 i = 0; i < count; i += 1){
+        markers[i*2].pos = base + stops[i].start;
+        markers[i*2].lean_right = false;
+        markers[i*2 + 1].pos = base + stops[i].end;
+        markers[i*2 + 1].lean_right = true;
+    }
+    managed_object_store_data(app, lsp_snippet_markers, 0, count*2, markers);
+    lsp_snippet_buffer = buffer;
+    lsp_snippet_count = count;
+    lsp_snippet_select(app, view, 0);
+    // NOTE(lsp): A lone $0 just places the cursor.
+    if (count == 1 && stops[0].number == 0){
+        lsp_snippet_close(app);
+    }
+}
+
+// NOTE(lsp): Called before typed text is inserted: typing over a placeholder replaces it.
+function void
+lsp_snippet_before_insert(Application_Links *app){
+    if (lsp_snippet_count > 0 && lsp_snippet_pending_replace){
+        View_ID view = get_active_view(app, Access_ReadWriteVisible);
+        Buffer_ID buffer = view_get_buffer(app, view, Access_ReadWriteVisible);
+        Range_i64 range = {};
+        if (buffer == lsp_snippet_buffer && lsp_snippet_stop_range(app, lsp_snippet_index, &range) &&
+            view_get_cursor_pos(app, view) == range.min){
+            buffer_replace_range(app, buffer, range, string_u8_empty);
+            view_set_cursor_and_preferred_x(app, view, seek_pos(range.min));
+        }
+    }
+    lsp_snippet_pending_replace = false;
+}
+
+// NOTE(lsp): Tab in insert mode; false when there is no snippet to move through.
+function b32
+lsp_snippet_next(Application_Links *app){
+    b32 result = false;
+    if (lsp_snippet_count > 0){
+        View_ID view = get_active_view(app, Access_ReadWriteVisible);
+        if (view_get_buffer(app, view, Access_Always) == lsp_snippet_buffer && lsp_snippet_index + 1 < lsp_snippet_count){
+            lsp_snippet_select(app, view, lsp_snippet_index + 1);
+            if (lsp_snippet_index + 1 >= lsp_snippet_count && !lsp_snippet_pending_replace){
+                lsp_snippet_close(app);
+            }
+            result = true;
+        }
+        else{
+            lsp_snippet_close(app);
+        }
+    }
+    return(result);
+}
+
+////////////////////////////////
+// NOTE(lsp): Completion
+
+// NOTE(lsp): Completion never blocks typing. A request goes out when a word starts or
+// after '.', and the answer is filtered and sorted locally with the lister's fuzzy scoring
+// on every key, so narrowing the list needs no round trip. Incomplete lists (jdtls caps
+// them) are requested again as the word grows.
+
+struct Lsp_Completion_Item{
+    String_Const_u8 label;
+    String_Const_u8 detail;
+    String_Const_u8 filter;
+    String_Const_u8 sort;
+    String_Const_u8 raw;
+    i64 kind;
+    i64 score;
+};
+
+global Arena lsp_completion_arena = {};
+global Lsp_Completion_Item *lsp_completion_items = 0;
+global i32 lsp_completion_item_count = 0;
+global i32 *lsp_completion_order = 0;
+global i32 *lsp_completion_sort_space = 0;
+global i32 lsp_completion_order_count = 0;
+global i32 lsp_completion_selected = 0;
+global b32 lsp_completion_wanted = false;
+global b32 lsp_completion_visible = false;
+global b32 lsp_completion_incomplete = false;
+global Buffer_ID lsp_completion_buffer = 0;
+global View_ID lsp_completion_view = 0;
+global i64 lsp_completion_start = 0;
+global i64 lsp_completion_request_id = 0;
+
+function void
+lsp_completion_close(void){
+    lsp_completion_wanted = false;
+    lsp_completion_visible = false;
+    lsp_completion_request_id = 0;
+}
+
+function b32
+lsp_completion_less(i32 a, i32 b){
+    Lsp_Completion_Item *x = &lsp_completion_items[a];
+    Lsp_Completion_Item *y = &lsp_completion_items[b];
+    b32 result = false;
+    if (x->score != y->score){
+        result = (x->score > y->score);
+    }
+    else{
+        result = (string_compare(x->sort, y->sort) < 0);
+    }
+    return(result);
+}
+
+function void
+lsp_completion_sort(i32 *order, i32 *temp, i32 count){
+    if (count > 1){
+        i32 half = count/2;
+        lsp_completion_sort(order, temp, half);
+        lsp_completion_sort(order + half, temp, count - half);
+        i32 a = 0;
+        i32 b = half;
+        for (i32 i = 0; i < count; i += 1){
+            if (b >= count || (a < half && !lsp_completion_less(order[b], order[a]))){
+                temp[i] = order[a++];
+            }
+            else{
+                temp[i] = order[b++];
+            }
+        }
+        block_copy_dynamic_array(order, temp, count);
+    }
+}
+
+function void
+lsp_completion_filter(Application_Links *app){
+    View_ID view = get_active_view(app, Access_Always);
+    i64 pos = view_get_cursor_pos(app, view);
+    if (view != lsp_completion_view || view_get_buffer(app, view, Access_Always) != lsp_completion_buffer ||
+        pos < lsp_completion_start){
+        lsp_completion_close();
+        return;
+    }
+    Scratch_Block scratch(app);
+    String_Const_u8 prefix = push_buffer_range(app, scratch, lsp_completion_buffer, Ii64(lsp_completion_start, pos));
+    for (u64 i = 0; i < prefix.size; i += 1){
+        if (!lsp_is_identifier_char(prefix.str[i])){
+            lsp_completion_close();
+            return;
+        }
+    }
+    lsp_completion_order_count = 0;
+    for (i32 i = 0; i < lsp_completion_item_count; i += 1){
+        Lsp_Completion_Item *item = &lsp_completion_items[i];
+        item->score = 0;
+        if (prefix.size == 0 || lister_fuzzy_score_term(item->filter, prefix, &item->score)){
+            lsp_completion_order[lsp_completion_order_count++] = i;
+        }
+    }
+    lsp_completion_sort(lsp_completion_order, lsp_completion_sort_space, lsp_completion_order_count);
+    // NOTE(lsp): Nothing is selected until Tab, like vim's completeopt=noselect.
+    lsp_completion_selected = -1;
+    lsp_completion_visible = (lsp_completion_order_count > 0);
+}
+
+function void
+lsp_completion_request(Application_Links *app, View_ID view, Buffer_ID buffer, Lsp_Document *doc, i64 start, u8 trigger){
+    Scratch_Block scratch(app);
+    lsp_sync_document(app, doc);
+    String_Const_u8 position = lsp_text_document_position(app, scratch, buffer, doc->uri, view_get_cursor_pos(app, view));
+    String_Const_u8 context = string_u8_litexpr("{\"triggerKind\":1}");
+    if (trigger != 0){
+        context = push_u8_stringf(scratch, "{\"triggerKind\":2,\"triggerCharacter\":\"%c\"}", trigger);
+    }
+    String_Const_u8 params = push_u8_stringf(scratch, "%.*s,\"context\":%.*s}", (i32)(position.size - 1), position.str, string_expand(context));
+    lsp_completion_request_id = lsp_send_request(app, "textDocument/completion", params);
+    lsp_completion_wanted = true;
+    lsp_completion_view = view;
+    lsp_completion_buffer = buffer;
+    lsp_completion_start = start;
+}
+
+function void
+lsp_completion_handle_result(Application_Links *app, Json_Value *result){
+    if (!lsp_completion_wanted){
+        return;
+    }
+    Json_Value *items = result;
+    lsp_completion_incomplete = false;
+    if (result->kind == JsonKind_Object){
+        items = json_get(result, "items");
+        lsp_completion_incomplete = json_get(result, "isIncomplete")->boolean;
+    }
+    if (lsp_completion_arena.base_allocator == 0){
+        lsp_completion_arena = make_arena_system();
+    }
+    linalloc_clear(&lsp_completion_arena);
+    i32 count = clamp_top(items->count, 4000);
+    lsp_completion_items = push_array_zero(&lsp_completion_arena, Lsp_Completion_Item, count);
+    lsp_completion_order = push_array(&lsp_completion_arena, i32, count);
+    lsp_completion_sort_space = push_array(&lsp_completion_arena, i32, count);
+    lsp_completion_item_count = 0;
+    for (Json_Value *item = items->first; item != 0 && lsp_completion_item_count < count; item = item->next){
+        Lsp_Completion_Item *out = &lsp_completion_items[lsp_completion_item_count++];
+        out->label = push_string_copy(&lsp_completion_arena, json_get(item, "label")->string);
+        out->detail = push_string_copy(&lsp_completion_arena, json_get(item, "detail")->string);
+        Json_Value *filter = json_get(item, "filterText");
+        out->filter = (filter->kind == JsonKind_String)?push_string_copy(&lsp_completion_arena, filter->string):out->label;
+        Json_Value *sort = json_get(item, "sortText");
+        out->sort = (sort->kind == JsonKind_String)?push_string_copy(&lsp_completion_arena, sort->string):out->label;
+        out->raw = push_string_copy(&lsp_completion_arena, item->raw);
+        out->kind = json_i64(json_get(item, "kind"));
+    }
+    lsp_completion_filter(app);
+}
+
+// NOTE(lsp): Called by the editing layer after typed text was inserted.
+function void
+lsp_completion_on_insert(Application_Links *app, String_Const_u8 text);
+
+function void lsp_signature_request(Application_Links *app, View_ID view, Buffer_ID buffer, Lsp_Document *doc);
+function void lsp_signature_close(void);
+
+function void
+lsp_completion_on_insert(Application_Links *app, String_Const_u8 text){
+    View_ID view = get_active_view(app, Access_ReadVisible);
+    Buffer_ID buffer = view_get_buffer(app, view, Access_ReadVisible);
+    Lsp_Document *doc = lsp_document_from_buffer(buffer);
+    if (doc == 0 || !lsp_initialized || text.size == 0){
+        lsp_completion_close();
+        return;
+    }
+    u8 c = text.str[text.size - 1];
+    i64 pos = view_get_cursor_pos(app, view);
+    if (lsp_is_identifier_char(c)){
+        if (lsp_completion_wanted && buffer == lsp_completion_buffer && lsp_completion_start <= pos){
+            lsp_completion_filter(app);
+            if (lsp_completion_wanted && lsp_completion_incomplete){
+                lsp_completion_request(app, view, buffer, doc, lsp_completion_start, 0);
+            }
+        }
+        else{
+            i64 start = pos;
+            for (;start > 0 && lsp_is_identifier_char(buffer_get_char(app, buffer, start - 1)); start -= 1);
+            lsp_completion_request(app, view, buffer, doc, start, 0);
+        }
+    }
+    else if (c == '.'){
+        lsp_completion_request(app, view, buffer, doc, pos, '.');
+    }
+    else{
+        lsp_completion_close();
+    }
+    
+    if (c == '(' || c == ','){
+        lsp_signature_request(app, view, buffer, doc);
+    }
+    else if (c == ')' || c == ';'){
+        lsp_signature_close();
+    }
+}
+
+function void
+lsp_completion_on_backspace(Application_Links *app){
+    if (lsp_completion_wanted){
+        lsp_completion_filter(app);
+    }
+}
+
+// NOTE(lsp): Ctrl-Space and friends: shows the menu for the word before the cursor.
+function b32
+lsp_completion_trigger(Application_Links *app){
+    View_ID view = get_active_view(app, Access_ReadVisible);
+    Buffer_ID buffer = view_get_buffer(app, view, Access_ReadVisible);
+    Lsp_Document *doc = lsp_document_from_buffer(buffer);
+    b32 result = false;
+    if (doc != 0 && lsp_initialized){
+        i64 start = view_get_cursor_pos(app, view);
+        for (;start > 0 && lsp_is_identifier_char(buffer_get_char(app, buffer, start - 1)); start -= 1);
+        lsp_completion_request(app, view, buffer, doc, start, 0);
+        result = true;
+    }
+    return(result);
+}
+
+function void
+lsp_completion_move(i32 delta){
+    if (lsp_completion_visible && lsp_completion_order_count > 0){
+        if (lsp_completion_selected < 0){
+            lsp_completion_selected = (delta > 0)?0:(lsp_completion_order_count - 1);
+        }
+        else{
+            lsp_completion_selected = (lsp_completion_selected + delta + lsp_completion_order_count) % lsp_completion_order_count;
+        }
+    }
+}
+
+function b32
+lsp_completion_accept(Application_Links *app){
+    if (!lsp_completion_visible){
+        return(false);
+    }
+    View_ID view = get_active_view(app, Access_ReadWriteVisible);
+    Buffer_ID buffer = view_get_buffer(app, view, Access_ReadWriteVisible);
+    if (lsp_completion_selected < 0){
+        return(false);
+    }
+    if (buffer != lsp_completion_buffer || lsp_completion_order_count == 0){
+        lsp_completion_close();
+        return(false);
+    }
+    Scratch_Block scratch(app);
+    Lsp_Completion_Item *item = &lsp_completion_items[lsp_completion_order[lsp_completion_selected]];
+    String_Const_u8 raw = push_string_copy(scratch, item->raw);
+    i64 start = lsp_completion_start;
+    lsp_completion_close();
+    
+    // NOTE(lsp): Resolving fills in the auto-import edits of the item.
+    Json_Value *json_item = lsp_request(app, scratch, "completionItem/resolve", raw);
+    if (json_item == 0 || json_item->kind != JsonKind_Object){
+        json_item = json_parse(scratch, raw);
+    }
+    
+    i64 cursor = view_get_cursor_pos(app, view);
+    String_Const_u8 new_text = json_get(json_item, "label")->string;
+    Json_Value *insert_text = json_get(json_item, "insertText");
+    if (insert_text->kind == JsonKind_String){
+        new_text = insert_text->string;
+    }
+    Json_Value *text_edit = json_get(json_item, "textEdit");
+    if (text_edit->kind == JsonKind_Object){
+        new_text = json_get(text_edit, "newText")->string;
+        Json_Value *range = json_get(text_edit, "range");
+        if (range->kind != JsonKind_Object){
+            range = json_get(text_edit, "insert");
+        }
+        start = Min(lsp_range_from_json(app, buffer, range).min, cursor);
+    }
+    
+    Lsp_Snippet_Stop stops[32];
+    i32 stop_count = 0;
+    if (json_i64(json_get(json_item, "insertTextFormat")) == 2){
+        new_text = lsp_snippet_expand(scratch, new_text, stops, &stop_count, ArrayCount(stops));
+    }
+    
+    Json_Value *additional = json_get(json_item, "additionalTextEdits");
+    Lsp_Edit *edits = push_array(scratch, Lsp_Edit, additional->count + 1);
+    i32 edit_count = lsp_collect_edits(app, buffer, additional, edits, additional->count);
+    i64 shift = 0;
+    for (i32 i = 0; i < edit_count; i += 1){
+        if (edits[i].range.max <= start){
+            shift += (i64)edits[i].text.size - range_size(edits[i].range);
+        }
+    }
+    edits[edit_count].range = Ii64(start, cursor);
+    edits[edit_count].text = new_text;
+    edit_count += 1;
+    lsp_apply_edits(app, buffer, edits, edit_count);
+    
+    i64 inserted_at = start + shift;
+    view_set_cursor_and_preferred_x(app, view, seek_pos(inserted_at + new_text.size));
+    lsp_snippet_begin(app, view, buffer, inserted_at, stops, stop_count);
+    return(true);
+}
+
+////////////////////////////////
+// NOTE(lsp): Signature help
+
+global Arena lsp_signature_arena = {};
+global String_Const_u8 lsp_signature_label = {};
+global Range_i64 lsp_signature_active = {};
+global View_ID lsp_signature_view = 0;
+global i64 lsp_signature_line = 0;
+global i64 lsp_signature_pos = 0;
+global i64 lsp_signature_request_id = 0;
+
+function void
+lsp_signature_close(void){
+    lsp_signature_label = string_u8_empty;
+    lsp_signature_request_id = 0;
+}
+
+function void
+lsp_signature_request(Application_Links *app, View_ID view, Buffer_ID buffer, Lsp_Document *doc){
+    Scratch_Block scratch(app);
+    lsp_sync_document(app, doc);
+    i64 pos = view_get_cursor_pos(app, view);
+    lsp_signature_request_id = lsp_send_request(app, "textDocument/signatureHelp",
+                                                lsp_text_document_position(app, scratch, buffer, doc->uri, pos));
+    lsp_signature_view = view;
+    lsp_signature_pos = pos;
+    lsp_signature_line = get_line_number_from_pos(app, buffer, pos);
+}
+
+function void
+lsp_signature_handle_result(Application_Links *app, Json_Value *result){
+    Json_Value *signatures = json_get(result, "signatures");
+    if (signatures->count == 0){
+        lsp_signature_close();
+        return;
+    }
+    i64 active_signature = clamp(0, json_i64(json_get(result, "activeSignature")), signatures->count - 1);
+    Json_Value *signature = signatures->first;
+    for (i64 i = 0; i < active_signature; i += 1){
+        signature = signature->next;
+    }
+    if (lsp_signature_arena.base_allocator == 0){
+        lsp_signature_arena = make_arena_system();
+    }
+    linalloc_clear(&lsp_signature_arena);
+    lsp_signature_label = push_string_copy(&lsp_signature_arena, json_get(signature, "label")->string);
+    lsp_signature_active = Ii64((i64)0);
+    
+    Json_Value *active_value = json_get(signature, "activeParameter");
+    if (active_value->kind != JsonKind_Number){
+        active_value = json_get(result, "activeParameter");
+    }
+    i64 active = json_i64(active_value);
+    Json_Value *parameter = json_get(signature, "parameters")->first;
+    for (i64 i = 0; parameter != 0 && i < active; i += 1){
+        parameter = parameter->next;
+    }
+    if (parameter != 0){
+        Json_Value *label = json_get(parameter, "label");
+        if (label->kind == JsonKind_String){
+            u64 at = string_find_first(lsp_signature_label, label->string);
+            if (at < lsp_signature_label.size){
+                lsp_signature_active = Ii64_size(at, label->string.size);
+            }
+        }
+        else if (label->kind == JsonKind_Array && label->count == 2){
+            lsp_signature_active = Ii64(json_i64(label->first), json_i64(label->first->next));
+        }
+    }
+}
+
+function b32
+lsp_handle_async_response(Application_Links *app, i64 id, Json_Value *json){
+    b32 result = false;
+    if (id != 0 && id == lsp_completion_request_id){
+        lsp_completion_request_id = 0;
+        lsp_completion_handle_result(app, json_get(json, "result"));
+        result = true;
+    }
+    else if (id != 0 && id == lsp_signature_request_id){
+        lsp_signature_request_id = 0;
+        lsp_signature_handle_result(app, json_get(json, "result"));
+        result = true;
+    }
+    return(result);
+}
+
+// NOTE(lsp): Closes signature help and completion once the cursor leaves where they apply.
+function void
+lsp_update_popups(Application_Links *app, View_ID active_view){
+    if (lsp_signature_label.size > 0){
+        Buffer_ID buffer = view_get_buffer(app, active_view, Access_Always);
+        if (active_view != lsp_signature_view ||
+            get_line_number_from_pos(app, buffer, view_get_cursor_pos(app, active_view)) != lsp_signature_line){
+            lsp_signature_close();
+        }
+    }
+    if (lsp_completion_wanted && (active_view != lsp_completion_view ||
+                                  view_get_buffer(app, active_view, Access_Always) != lsp_completion_buffer)){
+        lsp_completion_close();
+    }
+}
+
+////////////////////////////////
+// NOTE(lsp): More commands
+
+function void
+lsp_goto(Application_Links *app, char *method, char *title){
+    View_ID view = 0;
+    Buffer_ID buffer = 0;
+    Lsp_Document *doc = lsp_active_document(app, &view, &buffer);
+    if (doc == 0){
+        jump_to_definition_at_cursor(app);
+        return;
+    }
+    Scratch_Block scratch(app);
+    String_Const_u8 params = lsp_text_document_position(app, scratch, buffer, doc->uri, view_get_cursor_pos(app, view));
+    Json_Value *result = lsp_request(app, scratch, method, params);
+    if (result == 0){
+        return;
+    }
+    if (result->kind == JsonKind_Object){
+        lsp_jump_to_location(app, view, lsp_location_from_json(result));
+    }
+    else if (result->kind == JsonKind_Array && result->count == 1){
+        lsp_jump_to_location(app, view, lsp_location_from_json(result->first));
+    }
+    else if (result->kind == JsonKind_Array && result->count > 1){
+        Lsp_Location *locations = push_array(scratch, Lsp_Location, result->count);
+        i32 count = 0;
+        for (Json_Value *item = result->first; item != 0; item = item->next){
+            locations[count++] = lsp_location_from_json(item);
+        }
+        lsp_choose_location(app, view, locations, count, SCu8(title));
+    }
+    else{
+        print_message(app, push_u8_stringf(scratch, "lsp: nothing found (%s)\n", method));
+    }
+}
+
+CUSTOM_UI_COMMAND_SIG(lsp_goto_definition)
+CUSTOM_DOC("Jumps to the definition of the symbol under the cursor using the language server, or the code index outside Java files.")
+{
+    lsp_goto(app, "textDocument/definition", "Definitions:");
+}
+
+CUSTOM_UI_COMMAND_SIG(lsp_goto_declaration)
+CUSTOM_DOC("Jumps to the declaration of the symbol under the cursor using the language server.")
+{
+    lsp_goto(app, "textDocument/declaration", "Declarations:");
+}
+
+CUSTOM_UI_COMMAND_SIG(lsp_goto_implementation)
+CUSTOM_DOC("Jumps to the implementations of the symbol under the cursor using the language server.")
+{
+    lsp_goto(app, "textDocument/implementation", "Implementations:");
+}
+
+CUSTOM_UI_COMMAND_SIG(lsp_goto_type_definition)
+CUSTOM_DOC("Jumps to the type of the symbol under the cursor using the language server.")
+{
+    lsp_goto(app, "textDocument/typeDefinition", "Type definitions:");
+}
+
+CUSTOM_COMMAND_SIG(lsp_signature_help)
+CUSTOM_DOC("Shows the signature of the call around the cursor using the language server.")
+{
+    View_ID view = 0;
+    Buffer_ID buffer = 0;
+    Lsp_Document *doc = lsp_active_document(app, &view, &buffer);
+    if (doc != 0 && lsp_initialized){
+        lsp_signature_request(app, view, buffer, doc);
+    }
+}
+
+// NOTE(lsp): severity 0 matches every diagnostic; first and last pick the ends of the file.
+function void
+lsp_goto_diagnostic(Application_Links *app, b32 forward, i32 severity, b32 to_end){
+    View_ID view = 0;
+    Buffer_ID buffer = 0;
+    Lsp_Document *doc = lsp_active_document(app, &view, &buffer);
+    if (doc == 0 || doc->diagnostic_count == 0){
+        print_message(app, string_u8_litexpr("lsp: no diagnostics\n"));
+        return;
+    }
+    i64 pos = view_get_cursor_pos(app, view);
+    Lsp_Diagnostic *best = 0;
+    Lsp_Diagnostic *wrap = 0;
+    for (i32 i = 0; i < doc->diagnostic_count; i += 1){
+        Lsp_Diagnostic *d = &doc->diagnostics[i];
+        if (severity != 0 && d->severity != severity){
+            continue;
+        }
+        i64 start = d->range.min;
+        if (forward){
+            if (!to_end && start > pos && (best == 0 || start < best->range.min)){
+                best = d;
+            }
+            if (wrap == 0 || start < wrap->range.min){
+                wrap = d;
+            }
+        }
+        else{
+            if (!to_end && start < pos && (best == 0 || start > best->range.min)){
+                best = d;
+            }
+            if (wrap == 0 || start > wrap->range.min){
+                wrap = d;
+            }
+        }
+    }
+    if (best == 0){
+        best = wrap;
+    }
+    if (best == 0){
+        print_message(app, string_u8_litexpr("lsp: no diagnostics of that kind\n"));
+        return;
+    }
+    view_set_cursor_and_preferred_x(app, view, seek_pos(best->range.min));
+    lsp_show_popup(app, view, best->message);
+}
+
+CUSTOM_COMMAND_SIG(lsp_next_diagnostic)
+CUSTOM_DOC("Moves to the next error or warning reported by the language server and shows its message.")
+{
+    lsp_goto_diagnostic(app, true, 0, false);
+}
+
+CUSTOM_COMMAND_SIG(lsp_prev_diagnostic)
+CUSTOM_DOC("Moves to the previous error or warning reported by the language server and shows its message.")
+{
+    lsp_goto_diagnostic(app, false, 0, false);
+}
+
+CUSTOM_COMMAND_SIG(lsp_show_line_diagnostics)
+CUSTOM_DOC("Shows the language server messages for the cursor line in a popup.")
+{
+    View_ID view = 0;
+    Buffer_ID buffer = 0;
+    Lsp_Document *doc = lsp_active_document(app, &view, &buffer);
+    if (doc == 0){
+        return;
+    }
+    Scratch_Block scratch(app);
+    i64 line = get_line_number_from_pos(app, buffer, view_get_cursor_pos(app, view));
+    List_String_Const_u8 messages = {};
+    for (i32 i = 0; i < doc->diagnostic_count; i += 1){
+        if (doc->diagnostics[i].line == line){
+            string_list_push(scratch, &messages, doc->diagnostics[i].message);
+        }
+    }
+    if (messages.node_count > 0){
+        lsp_show_popup(app, view, string_list_flatten(scratch, messages, 0, string_u8_litexpr("\n"), 0, StringFill_NoTerminate));
+    }
+}
+
+CUSTOM_UI_COMMAND_SIG(lsp_rename)
+CUSTOM_DOC("Renames the symbol under the cursor everywhere using the language server.")
+{
+    View_ID view = 0;
+    Buffer_ID buffer = 0;
+    Lsp_Document *doc = lsp_active_document(app, &view, &buffer);
+    if (doc == 0){
+        return;
+    }
+    Scratch_Block scratch(app);
+    i64 pos = view_get_cursor_pos(app, view);
+    String_Const_u8 word = push_buffer_range(app, scratch, buffer, enclose_pos_alpha_numeric_underscore(app, buffer, pos));
+    Query_Bar_Group group(app);
+    u8 space[256];
+    Query_Bar bar = {};
+    bar.prompt = string_u8_litexpr("Rename to: ");
+    bar.string = SCu8(space, (u64)0);
+    bar.string_capacity = sizeof(space);
+    if (!query_user_general(app, &bar, false, word) || bar.string.size == 0){
+        return;
+    }
+    String_Const_u8 position = lsp_text_document_position(app, scratch, buffer, doc->uri, pos);
+    String_Const_u8 params = push_u8_stringf(scratch, "%.*s,\"newName\":\"%.*s\"}", (i32)(position.size - 1), position.str,
+                                             string_expand(json_escape(scratch, bar.string)));
+    Json_Value *result = lsp_request(app, scratch, "textDocument/rename", params);
+    if (result != 0 && result->kind == JsonKind_Object){
+        i32 count = lsp_apply_workspace_edit(app, result);
+        print_message(app, push_u8_stringf(scratch, "lsp: renamed %d occurrences\n", count));
+    }
+}
+
+function void
+lsp_run_command(Application_Links *app, Arena *arena, Json_Value *command){
+    String_Const_u8 name = json_get(command, "command")->string;
+    Json_Value *arguments = json_get(command, "arguments");
+    if (string_match(name, string_u8_litexpr("java.apply.workspaceEdit"))){
+        for (Json_Value *argument = arguments->first; argument != 0; argument = argument->next){
+            lsp_apply_workspace_edit(app, argument);
+        }
+    }
+    else if (name.size > 0){
+        String_Const_u8 args = (arguments->kind == JsonKind_Array)?arguments->raw:string_u8_litexpr("[]");
+        Json_Value *result = lsp_request(app, arena, "workspace/executeCommand",
+                                         push_u8_stringf(arena, "{\"command\":\"%.*s\",\"arguments\":%.*s}",
+                                                         string_expand(json_escape(arena, name)), string_expand(args)));
+        if (result != 0 && result->kind == JsonKind_Object &&
+            (json_get(result, "changes")->kind == JsonKind_Object || json_get(result, "documentChanges")->kind == JsonKind_Array)){
+            lsp_apply_workspace_edit(app, result);
+        }
+    }
+}
+
+function void
+lsp_run_code_action(Application_Links *app, Arena *arena, Json_Value *action){
+    Json_Value *edit = json_get(action, "edit");
+    if (edit->kind == JsonKind_Object){
+        lsp_apply_workspace_edit(app, edit);
+    }
+    Json_Value *command = json_get(action, "command");
+    if (command->kind == JsonKind_Object){
+        lsp_run_command(app, arena, command);
+    }
+    else if (command->kind == JsonKind_String){
+        lsp_run_command(app, arena, action);
+    }
+}
+
+// NOTE(lsp): Quick fixes and refactorings for the cursor line. only limits the kind, e.g.
+// "source" or "source.organizeImports"; apply_first skips the list.
+function void
+lsp_code_action(Application_Links *app, char *only, b32 apply_first){
+    View_ID view = 0;
+    Buffer_ID buffer = 0;
+    Lsp_Document *doc = lsp_active_document(app, &view, &buffer);
+    if (doc == 0){
+        return;
+    }
+    Scratch_Block scratch(app);
+    i64 pos = view_get_cursor_pos(app, view);
+    i64 line = get_line_number_from_pos(app, buffer, pos);
+    i64 line_end_char = 0;
+    i64 line_index = 0;
+    lsp_position_from_pos(app, buffer, get_line_end_pos(app, buffer, line), &line_index, &line_end_char);
+    List_String_Const_u8 diagnostics = {};
+    for (i32 i = 0; i < doc->diagnostic_count; i += 1){
+        if (doc->diagnostics[i].line == line){
+            string_list_push(scratch, &diagnostics, doc->diagnostics[i].raw);
+        }
+    }
+    String_Const_u8 only_part = string_u8_empty;
+    if (only != 0){
+        only_part = push_u8_stringf(scratch, ",\"only\":[\"%s\"]", only);
+    }
+    String_Const_u8 params = push_u8_stringf(scratch,
+                                             "{\"textDocument\":{\"uri\":\"%.*s\"},"
+                                             "\"range\":{\"start\":{\"line\":%lld,\"character\":0},\"end\":{\"line\":%lld,\"character\":%lld}},"
+                                             "\"context\":{\"diagnostics\":[%.*s]%.*s}}",
+                                             string_expand(json_escape(scratch, doc->uri)), line_index, line_index, line_end_char,
+                                             string_expand(string_list_flatten(scratch, diagnostics, 0, string_u8_litexpr(","), 0, StringFill_NoTerminate)),
+                                             string_expand(only_part));
+    Json_Value *result = lsp_request(app, scratch, "textDocument/codeAction", params);
+    if (result == 0 || result->kind != JsonKind_Array || result->count == 0){
+        print_message(app, string_u8_litexpr("lsp: no code actions here\n"));
+        return;
+    }
+    if (apply_first){
+        lsp_run_code_action(app, scratch, result->first);
+        return;
+    }
+    Json_Value **actions = push_array(scratch, Json_Value*, result->count);
+    Lister_Block lister(app, scratch);
+    lister_set_query(lister, "Code actions:");
+    lister_set_default_handlers(lister);
+    ((Lister*)lister)->fuzzy_filter = true;
+    i32 count = 0;
+    for (Json_Value *item = result->first; item != 0; item = item->next){
+        actions[count] = item;
+        lister_add_item(lister, json_get(item, "title")->string, json_get(item, "kind")->string, IntAsPtr(count), 0);
+        count += 1;
+    }
+    Lister_Result l_result = run_lister(app, lister);
+    if (!l_result.canceled){
+        lsp_run_code_action(app, scratch, actions[PtrAsInt(l_result.user_data)]);
+    }
+}
+
+CUSTOM_UI_COMMAND_SIG(lsp_code_actions)
+CUSTOM_DOC("Lists the language server's quick fixes and refactorings for the cursor line.")
+{
+    lsp_code_action(app, 0, false);
+}
+
+CUSTOM_UI_COMMAND_SIG(lsp_source_actions)
+CUSTOM_DOC("Lists the language server's source actions (generate, organize imports ...) for the file.")
+{
+    lsp_code_action(app, "source", false);
+}
+
+CUSTOM_COMMAND_SIG(lsp_organize_imports)
+CUSTOM_DOC("Adds missing imports and removes unused ones using the language server.")
+{
+    lsp_code_action(app, "source.organizeImports", true);
+}
+
+CUSTOM_COMMAND_SIG(lsp_format)
+CUSTOM_DOC("Formats the file with the language server.")
+{
+    View_ID view = 0;
+    Buffer_ID buffer = 0;
+    Lsp_Document *doc = lsp_active_document(app, &view, &buffer);
+    if (doc == 0){
+        return;
+    }
+    Scratch_Block scratch(app);
+    i32 indent_width = (i32)def_get_config_u64(app, vars_save_string_lit("indent_width"));
+    b32 indent_with_tabs = def_get_config_b32(vars_save_string_lit("indent_with_tabs"));
+    String_Const_u8 params = push_u8_stringf(scratch, "{\"textDocument\":{\"uri\":\"%.*s\"},\"options\":{\"tabSize\":%d,\"insertSpaces\":%s}}",
+                                             string_expand(json_escape(scratch, doc->uri)), clamp_bot(1, indent_width),
+                                             indent_with_tabs?"false":"true");
+    Json_Value *result = lsp_request(app, scratch, "textDocument/formatting", params);
+    if (result != 0 && result->kind == JsonKind_Array && result->count > 0){
+        Lsp_Edit *edits = push_array(scratch, Lsp_Edit, result->count);
+        i32 count = lsp_collect_edits(app, buffer, result, edits, result->count);
+        lsp_apply_edits(app, buffer, edits, count);
+    }
+}
+
+struct Lsp_Symbol{
+    String_Const_u8 name;
+    Lsp_Location location;
+};
+
+function void
+lsp_collect_document_symbols(Arena *arena, Json_Value *list, String_Const_u8 container, String_Const_u8 uri,
+                             Lister *lister, Lsp_Symbol *symbols, i32 *count, i32 max){
+    for (Json_Value *item = list->first; item != 0 && *count < max; item = item->next){
+        String_Const_u8 name = json_get(item, "name")->string;
+        String_Const_u8 full_name = name;
+        if (container.size > 0){
+            full_name = push_u8_stringf(arena, "%.*s.%.*s", string_expand(container), string_expand(name));
+        }
+        Lsp_Symbol *symbol = &symbols[*count];
+        symbol->name = full_name;
+        Json_Value *location = json_get(item, "location");
+        if (location->kind == JsonKind_Object){
+            symbol->location = lsp_location_from_json(location);
+        }
+        else{
+            Json_Value *start = json_get(json_get(item, "selectionRange"), "start");
+            symbol->location.uri = uri;
+            symbol->location.line = json_i64(json_get(start, "line"));
+            symbol->location.character = json_i64(json_get(start, "character"));
+        }
+        char *kind = lsp_kind_name(lsp_symbol_kind_names, ArrayCount(lsp_symbol_kind_names), json_i64(json_get(item, "kind")));
+        String_Const_u8 detail = json_get(item, "containerName")->string;
+        if (detail.size == 0){
+            detail = json_get(item, "detail")->string;
+        }
+        lister_add_item(lister, full_name, push_u8_stringf(arena, "%s %.*s", kind, string_expand(detail)), IntAsPtr(*count), 0);
+        *count += 1;
+        Json_Value *children = json_get(item, "children");
+        if (children->count > 0){
+            lsp_collect_document_symbols(arena, children, full_name, uri, lister, symbols, count, max);
+        }
+    }
+}
+
+function void
+lsp_symbols(Application_Links *app, b32 workspace){
+    View_ID view = 0;
+    Buffer_ID buffer = 0;
+    Lsp_Document *doc = lsp_active_document(app, &view, &buffer);
+    if (doc == 0 && !(workspace && lsp_initialized)){
+        list_all_functions_current_buffer_lister(app);
+        return;
+    }
+    Scratch_Block scratch(app);
+    Json_Value *result = 0;
+    if (workspace){
+        Query_Bar_Group group(app);
+        u8 space[256];
+        Query_Bar bar = {};
+        bar.prompt = string_u8_litexpr("Workspace symbol: ");
+        bar.string = SCu8(space, (u64)0);
+        bar.string_capacity = sizeof(space);
+        if (!query_user_string(app, &bar)){
+            return;
+        }
+        result = lsp_request(app, scratch, "workspace/symbol",
+                             push_u8_stringf(scratch, "{\"query\":\"%.*s\"}", string_expand(json_escape(scratch, bar.string))));
+    }
+    else{
+        result = lsp_request(app, scratch, "textDocument/documentSymbol",
+                             push_u8_stringf(scratch, "{\"textDocument\":{\"uri\":\"%.*s\"}}", string_expand(json_escape(scratch, doc->uri))));
+    }
+    if (result == 0 || result->kind != JsonKind_Array || result->count == 0){
+        print_message(app, string_u8_litexpr("lsp: no symbols\n"));
+        return;
+    }
+    i32 max = 20000;
+    Lsp_Symbol *symbols = push_array_zero(scratch, Lsp_Symbol, max);
+    i32 count = 0;
+    Lister_Block lister(app, scratch);
+    lister_set_query(lister, workspace?string_u8_litexpr("Workspace symbols:"):string_u8_litexpr("Symbols:"));
+    lister_set_default_handlers(lister);
+    ((Lister*)lister)->fuzzy_filter = true;
+    lsp_collect_document_symbols(scratch, result, string_u8_empty, (doc != 0)?doc->uri:string_u8_empty, lister, symbols, &count, max);
+    Lister_Result l_result = run_lister(app, lister);
+    if (!l_result.canceled){
+        lsp_jump_to_location(app, view, symbols[PtrAsInt(l_result.user_data)].location);
+    }
+}
+
+CUSTOM_UI_COMMAND_SIG(lsp_document_symbols)
+CUSTOM_DOC("Lists the classes, methods and fields of this file with fzf style filtering.")
+{
+    lsp_symbols(app, false);
+}
+
+CUSTOM_UI_COMMAND_SIG(lsp_workspace_symbols)
+CUSTOM_DOC("Searches the symbols of the whole workspace using the language server.")
+{
+    lsp_symbols(app, true);
 }
 
 ////////////////////////////////
@@ -1750,6 +2998,105 @@ lsp_draw_popup(Application_Links *app, View_ID view_id, Text_Layout_ID text_layo
     }
 }
 
+function void
+lsp_draw_snippet(Application_Links *app, Buffer_ID buffer, Text_Layout_ID text_layout_id, f32 roundness){
+    Range_i64 range = {};
+    if (lsp_snippet_count > 0 && lsp_snippet_pending_replace && buffer == lsp_snippet_buffer &&
+        lsp_snippet_stop_range(app, lsp_snippet_index, &range) && range.max > range.min){
+        draw_character_block(app, text_layout_id, range, roundness, fcolor_id(defcolor_highlight));
+        paint_text_color_fcolor(app, text_layout_id, range, fcolor_id(defcolor_at_highlight));
+    }
+}
+
+// NOTE(lsp): The menu sits under the start of the word being completed.
+function void
+lsp_draw_completion(Application_Links *app, View_ID view_id, Text_Layout_ID text_layout_id, Face_ID face_id, Rect_f32 region){
+    if (!lsp_completion_visible || view_id != lsp_completion_view || lsp_completion_order_count == 0){
+        return;
+    }
+    Scratch_Block scratch(app);
+    Face_Metrics metrics = get_face_metrics(app, face_id);
+    Rect_f32 anchor = text_layout_character_on_screen(app, text_layout_id, lsp_completion_start);
+    i32 rows = clamp_top(lsp_completion_order_count, 12);
+    i32 first = clamp_bot(0, lsp_completion_selected - rows + 1);
+    
+    f32 kind_width = metrics.normal_advance*8.f;
+    f32 label_width = 0.f;
+    f32 detail_width = 0.f;
+    for (i32 i = 0; i < rows; i += 1){
+        Lsp_Completion_Item *item = &lsp_completion_items[lsp_completion_order[first + i]];
+        label_width = Max(label_width, get_string_advance(app, face_id, string_prefix(item->label, 60)));
+        detail_width = Max(detail_width, get_string_advance(app, face_id, string_prefix(item->detail, 50)));
+    }
+    f32 pad = metrics.normal_advance;
+    f32 width = kind_width + label_width + 2.f*pad + detail_width + pad;
+    f32 height = rows*metrics.line_height + pad*0.5f;
+    Rect_f32 box = Rf32(anchor.x0 - pad, anchor.y1 + 2.f, anchor.x0 - pad + width, anchor.y1 + 2.f + height);
+    if (box.y1 > region.y1){
+        box.y1 = anchor.y0 - 2.f;
+        box.y0 = box.y1 - height;
+    }
+    if (box.x1 > region.x1){
+        f32 shift = clamp_top(box.x1 - region.x1, box.x0 - region.x0);
+        box.x0 -= shift;
+        box.x1 -= shift;
+    }
+    
+    ARGB_Color back = lsp_theme_color(defcolor_lsp_popup_back, fcolor_resolve(fcolor_id(defcolor_margin)));
+    draw_rectangle(app, box, 4.f, back);
+    draw_rectangle_outline(app, box, 4.f, 1.f, fcolor_resolve(fcolor_id(defcolor_margin_active)));
+    ARGB_Color text_color = fcolor_resolve(fcolor_id(defcolor_text_default));
+    ARGB_Color dim_color = fcolor_resolve(fcolor_id(defcolor_comment));
+    ARGB_Color kind_color = fcolor_resolve(fcolor_id(defcolor_keyword));
+    for (i32 i = 0; i < rows; i += 1){
+        i32 index = first + i;
+        Lsp_Completion_Item *item = &lsp_completion_items[lsp_completion_order[index]];
+        f32 y = box.y0 + pad*0.25f + i*metrics.line_height;
+        if (index == lsp_completion_selected){
+            draw_rectangle(app, Rf32(box.x0 + 1.f, y, box.x1 - 1.f, y + metrics.line_height), 2.f,
+                           fcolor_resolve(fcolor_id(defcolor_list_item_active)));
+        }
+        char *kind = lsp_kind_name(lsp_kind_names, ArrayCount(lsp_kind_names), item->kind);
+        draw_string(app, face_id, SCu8(kind), V2f32(box.x0 + pad, y), kind_color);
+        draw_string(app, face_id, string_prefix(item->label, 60), V2f32(box.x0 + pad + kind_width, y), text_color);
+        draw_string(app, face_id, string_prefix(item->detail, 50), V2f32(box.x0 + pad + kind_width + label_width + pad, y), dim_color);
+    }
+}
+
+// NOTE(lsp): The signature sits above the cursor line with the current parameter lit.
+function void
+lsp_draw_signature(Application_Links *app, View_ID view_id, Text_Layout_ID text_layout_id, Face_ID face_id, Rect_f32 region){
+    if (lsp_signature_label.size == 0 || view_id != lsp_signature_view){
+        return;
+    }
+    Face_Metrics metrics = get_face_metrics(app, face_id);
+    Rect_f32 anchor = text_layout_character_on_screen(app, text_layout_id, lsp_signature_pos);
+    String_Const_u8 label = string_prefix(lsp_signature_label, 200);
+    f32 pad = metrics.normal_advance;
+    f32 width = get_string_advance(app, face_id, label) + 2.f*pad;
+    Rect_f32 box = Rf32(anchor.x0 - pad, anchor.y0 - 2.f - metrics.line_height - pad*0.5f, anchor.x0 - pad + width, anchor.y0 - 2.f);
+    if (box.y0 < region.y0){
+        box.y0 = anchor.y1 + 2.f;
+        box.y1 = box.y0 + metrics.line_height + pad*0.5f;
+    }
+    if (box.x1 > region.x1){
+        f32 shift = clamp_top(box.x1 - region.x1, box.x0 - region.x0);
+        box.x0 -= shift;
+        box.x1 -= shift;
+    }
+    draw_rectangle(app, box, 4.f, lsp_theme_color(defcolor_lsp_popup_back, fcolor_resolve(fcolor_id(defcolor_margin))));
+    draw_rectangle_outline(app, box, 4.f, 1.f, fcolor_resolve(fcolor_id(defcolor_margin_active)));
+    Vec2_f32 p = V2f32(box.x0 + pad, box.y0 + pad*0.25f);
+    Range_i64 active = Ii64(clamp_top(lsp_signature_active.min, (i64)label.size), clamp_top(lsp_signature_active.max, (i64)label.size));
+    String_Const_u8 before = string_prefix(label, active.min);
+    String_Const_u8 middle = string_substring(label, active);
+    String_Const_u8 after = string_skip(label, active.max);
+    ARGB_Color text_color = fcolor_resolve(fcolor_id(defcolor_text_default));
+    p = draw_string(app, face_id, before, p, text_color);
+    p = draw_string(app, face_id, middle, p, fcolor_resolve(fcolor_id(defcolor_keyword)));
+    draw_string(app, face_id, after, p, text_color);
+}
+
 function String_Const_u8
 lsp_status_label(Application_Links *app, Arena *arena, Buffer_ID buffer){
     String_Const_u8 result = {};
@@ -1781,7 +3128,6 @@ lsp_status_label(Application_Links *app, Arena *arena, Buffer_ID buffer){
 function void
 lsp_init(Application_Links *app){
     lsp_arena = make_arena_system();
-    set_custom_hook(app, HookID_Tick, lsp_tick);
 }
 
 #endif //FCODER_LSP_CPP

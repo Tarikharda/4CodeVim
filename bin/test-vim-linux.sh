@@ -2,7 +2,9 @@
 
 # End to end tests for the vim layer. Each case opens a fixture in a fresh 4coder
 # window from ../build, types keys with xdotool, saves with :w and compares the file.
-# Needs an X display. Keys are only sent while the launched window has focus.
+# Runs on a private Xvfb display so no key can reach the user's own windows
+# (sudo apt install xvfb). VIM_TEST_REAL_DISPLAY=1 uses the current display instead,
+# only sending keys while the launched window has focus.
 #
 #   bin/test-vim-linux.sh            run every case
 #   bin/test-vim-linux.sh dot        run cases whose name contains "dot"
@@ -17,7 +19,29 @@ BUILD_ROOT="$PROJECT_ROOT/build"
 
 FILTER="$1"
 WORK_DIR="$(mktemp -d)"
-trap 'rm -rf "$WORK_DIR"' EXIT
+XVFB_PID=""
+trap 'rm -rf "$WORK_DIR"; [ -n "$XVFB_PID" ] && kill $XVFB_PID 2> /dev/null' EXIT
+
+if [ -z "$VIM_TEST_REAL_DISPLAY" ]; then
+    if ! command -v Xvfb > /dev/null; then
+        echo "test-vim: needs Xvfb so test keys never reach your own windows (sudo apt install xvfb)"
+        echo "test-vim: or run with VIM_TEST_REAL_DISPLAY=1 to use the current display"
+        exit 2
+    fi
+    for NUMBER in $(seq 90 99); do
+        [ -e "/tmp/.X11-unix/X$NUMBER" ] || break
+    done
+    Xvfb ":$NUMBER" -screen 0 1920x1080x24 > /dev/null 2>&1 &
+    XVFB_PID=$!
+    export DISPLAY=":$NUMBER"
+    sleep 1
+    # NOTE: No window manager here, so focus is set directly on the window.
+    focus_window(){ xdotool windowfocus --sync "$1" > /dev/null 2>&1; }
+    active_window(){ xdotool getwindowfocus 2> /dev/null; }
+else
+    focus_window(){ xdotool windowactivate --sync "$1" > /dev/null 2>&1; }
+    active_window(){ xdotool getactivewindow 2> /dev/null; }
+fi
 # NOTE: A git repository makes the fixture's folder the root for the rg/fzf pickers.
 git init -q "$WORK_DIR"
 
@@ -47,12 +71,17 @@ run_case(){
         sleep 0.1
     done
     sleep 0.8
-    xdotool windowactivate --sync "$window" > /dev/null 2>&1
+    focus_window "$window"
     sleep 0.2
 
     local ok=1
     for step in "$@"; do
-        if [ "$(xdotool getactivewindow 2>/dev/null)" != "$window" ]; then
+        if [ "$(active_window)" != "$window" ]; then
+            # NOTE: Something else took focus; take it back once before giving up.
+            focus_window "$window"
+            sleep 0.3
+        fi
+        if [ "$(active_window)" != "$window" ]; then
             ok=0
             break
         fi
@@ -62,7 +91,7 @@ run_case(){
         esac
         sleep 0.1
     done
-    if [ $ok = 1 ] && [ "$(xdotool getactivewindow 2>/dev/null)" = "$window" ]; then
+    if [ $ok = 1 ] && [ "$(active_window)" = "$window" ]; then
         xdotool key Escape
         xdotool type --delay 60 ":w"
         xdotool key Return
@@ -116,7 +145,8 @@ check "dw"                   txt "$TXT" $'beta gamma\n'"$L2"$'\n'"$L3"$'\n'"$L4"
 check "cw"                   txt "$TXT" $'alpha XX gamma\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:w t:cwXX
 check "cw on last char"      txt "$TXT" $'alphZ beta gamma\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:e t:cwZ
 check "ge"                   txt "$TXT" $'alpha bet gamma\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:ww t:ge t:x
-check "Y yanks to eol"       txt "$TXT" $'alpha beta gammabeta gamma\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:w t:Y t:'$' t:p
+check "Y is yy"             txt "$TXT" "$L1"$'\n'"$L1"$'\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:w t:Y t:'$' t:p
+check "K is E"               txt "$TXT" $'alph beta gamma\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:K t:x
 check "J"                    txt "$TXT" $'alpha beta gamma indented line two\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:J
 check "gJ"                   txt "$TXT" "$L1$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:gJ
 check "R replace"            txt "$TXT" $'XYpha beta gamma\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:RXY
@@ -153,6 +183,7 @@ check "macro count"          txt "$TXT" "$L1"$';\n'"$L2"$';\n'"$L3"$';\n'"$L4"$'
 
 # Search and ex
 check "search"               txt "$TXT" "$L1"$'\n    indented \n'"$L3"$'\n'"$L4"$'\n'  t:gg t:/line k:Return t:D
+check "smartcase"            txt "$TXT" $'lpha beta gamma\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:/BETA k:Return t:x
 check "search n"             txt "$TXT" $'alph beta gamma\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:/a k:Return t:x
 check ":s first only"        txt "$TXT" $'Xlpha beta gamma\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t::s/a/X/ k:Return
 check ":%s global"           txt "$TXT" $'XlphX betX gXmmX\n'"$L2"$'\nthree (X, b) "str"\n'"$L4"$'\n'  t::%s/a/X/g k:Return
@@ -163,8 +194,8 @@ check "visual :s"            txt "$TXT" $'Xlpha beta gamma\n'"$L2"$'\nthree (X, 
 check ":Rg fuzzy jump"       txt "$TXT" "$L1"$'\n'"$L2"$'\n'"$L3"$'\n'  t::Rg\ e k:Return "t:fo end" k:Return t:dd
 
 # Indentation
-check "V j >"                txt "$TXT" "    $L1"$'\n'"    $L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:Vj t:'>'
-check "java o indent"        java "$JAVA" $'public class Hello {\n    public static void main(String[] args) {\n        int y = 1;\n        System.out.println("hello world");\n    }\n}\n'  t:gg t:j "t:oint y = 1;"
+check "V j >"                txt "$TXT" "  $L1"$'\n'"  $L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:Vj t:'>'
+check "java o indent"        java "$JAVA" $'public class Hello {\n    public static void main(String[] args) {\n    int y = 1;\n        System.out.println("hello world");\n    }\n}\n'  t:gg t:j "t:oint y = 1;"
 
 echo
 echo "$PASSED passed, $FAILED failed"

@@ -41,13 +41,13 @@ lister_roundness = 20;
 
 // Code Wrapping
 treat_as_code = ".cpp.c.hpp.h.cc.cs.java.rs.glsl.m.mm";
-enable_virtual_whitespace = true;
-virtual_whitespace_regular_indent = 4;
+enable_virtual_whitespace = false;
+virtual_whitespace_regular_indent = 2;
 enable_code_wrapping = true;
 
 // This only applies to code files in code-wrapping mode.
 // Plain text and code files without virtual-whitespace will not be effected.
-automatically_indent_text_on_save = true;
+automatically_indent_text_on_save = false;
 
 // When set to true, all unsaved changes will be saved on a build.
 automatically_save_changes_on_build = true;
@@ -57,8 +57,8 @@ automatically_load_project = false;
 
 // Indentation
 indent_with_tabs = false;
-indent_width = 4;
-default_tab_width = 4;
+indent_width = 2;
+default_tab_width = 2;
 
 // Theme
 default_theme_name = "theme-gruber-darker";

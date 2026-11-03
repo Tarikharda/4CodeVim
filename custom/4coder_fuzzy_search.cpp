@@ -39,6 +39,24 @@ fuzzy_search_root(Application_Links *app, Arena *arena){
     return(result);
 }
 
+// NOTE: The folder of the current file, or the hot directory for buffers without a file.
+function String_Const_u8
+fuzzy_file_dir(Application_Links *app, Arena *arena){
+    View_ID view = get_active_view(app, Access_Always);
+    Buffer_ID buffer = view_get_buffer(app, view, Access_Always);
+    String_Const_u8 result = push_buffer_file_name(app, arena, buffer);
+    if (result.size > 0){
+        result = string_remove_last_folder(result);
+    }
+    else{
+        result = push_hot_directory(app, arena);
+    }
+    for (;result.size > 1 && character_is_slash(string_get_character(result, result.size - 1));){
+        result = string_chop(result, 1);
+    }
+    return(result);
+}
+
 function String_Const_u8
 fuzzy_shell_quote(Arena *arena, String_Const_u8 string){
     u8 *out = push_array(arena, u8, string.size*4 + 3);
@@ -205,9 +223,8 @@ fuzzy_grep_in(Application_Links *app, String_Const_u8 root, String_Const_u8 patt
 }
 
 function void
-fuzzy_grep_query(Application_Links *app, String_Const_u8 init){
+fuzzy_grep_query(Application_Links *app, String_Const_u8 root, String_Const_u8 init){
     Scratch_Block scratch(app);
-    String_Const_u8 root = fuzzy_search_root(app, scratch);
     Query_Bar_Group group(app);
     u8 space[256];
     Query_Bar bar = {};
@@ -229,7 +246,22 @@ CUSTOM_DOC("Lists the files of the current project (ripgrep --files) with fzf st
 CUSTOM_UI_COMMAND_SIG(fuzzy_grep)
 CUSTOM_DOC("Queries for a pattern, searches the current project with ripgrep and lists the matches with fzf style filtering.")
 {
-    fuzzy_grep_query(app, string_u8_empty);
+    Scratch_Block scratch(app);
+    fuzzy_grep_query(app, fuzzy_search_root(app, scratch), string_u8_empty);
+}
+
+CUSTOM_UI_COMMAND_SIG(fuzzy_grep_here)
+CUSTOM_DOC("Queries for a pattern, searches the current file's folder with ripgrep and lists the matches with fzf style filtering.")
+{
+    Scratch_Block scratch(app);
+    fuzzy_grep_query(app, fuzzy_file_dir(app, scratch), string_u8_empty);
+}
+
+CUSTOM_UI_COMMAND_SIG(fuzzy_find_file_here)
+CUSTOM_DOC("Lists the files under the current file's folder with fzf style filtering and opens the chosen one.")
+{
+    Scratch_Block scratch(app);
+    fuzzy_find_file_in(app, fuzzy_file_dir(app, scratch));
 }
 
 CUSTOM_UI_COMMAND_SIG(fuzzy_grep_identifier)

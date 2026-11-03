@@ -60,5 +60,11 @@ defcolor_lsp_error = managed_id_declare(app, string_u8_litexpr("colors"), string
 defcolor_lsp_warning = managed_id_declare(app, string_u8_litexpr("colors"), string_u8_litexpr("defcolor_lsp_warning"));
 defcolor_lsp_info = managed_id_declare(app, string_u8_litexpr("colors"), string_u8_litexpr("defcolor_lsp_info"));
 defcolor_lsp_popup_back = managed_id_declare(app, string_u8_litexpr("colors"), string_u8_litexpr("defcolor_lsp_popup_back"));
+defcolor_git_added = managed_id_declare(app, string_u8_litexpr("colors"), string_u8_litexpr("defcolor_git_added"));
+defcolor_git_modified = managed_id_declare(app, string_u8_litexpr("colors"), string_u8_litexpr("defcolor_git_modified"));
+defcolor_git_removed = managed_id_declare(app, string_u8_litexpr("colors"), string_u8_litexpr("defcolor_git_removed"));
+defcolor_git_bar_added = managed_id_declare(app, string_u8_litexpr("colors"), string_u8_litexpr("defcolor_git_bar_added"));
+defcolor_git_bar_modified = managed_id_declare(app, string_u8_litexpr("colors"), string_u8_litexpr("defcolor_git_bar_modified"));
+defcolor_git_bar_removed = managed_id_declare(app, string_u8_litexpr("colors"), string_u8_litexpr("defcolor_git_bar_removed"));
 vim_buffer_marks = managed_id_declare(app, string_u8_litexpr("attachment"), string_u8_litexpr("vim_buffer_marks"));
 }

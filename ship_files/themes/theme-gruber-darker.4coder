@@ -51,3 +51,11 @@ defcolor_lsp_error = 0xFFF75464;
 defcolor_lsp_warning = 0xFFF2C55C;
 defcolor_lsp_info = 0xFF96A6C8;
 defcolor_lsp_popup_back = 0xFF2B2D30;
+
+defcolor_git_added = 0xFF549159;
+defcolor_git_modified = 0xFF375FAD;
+defcolor_git_removed = 0xFFF75464;
+
+defcolor_git_bar_added = 0xFF73BD79;
+defcolor_git_bar_modified = 0xFF70AEFF;
+defcolor_git_bar_removed = 0xFFF75464;

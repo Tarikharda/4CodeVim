@@ -43,9 +43,10 @@ struct Vim_Register{
 
 #define VimCtrl(c) ((u8)((c) - 'a' + 1))
 
-#define VimRegisterCount 36
+#define VimRegisterCount 37
 #define VimRegisterYank 26
 #define VimRegisterDelete 27
+#define VimRegisterUnnamed 36
 
 #define VimMarkCount 27
 #define VimMarkLastJump 26
@@ -68,8 +69,9 @@ global String_ID vim_map_replace = 0;
 global History_Group vim_change_history = {};
 global b32 vim_change_history_active = false;
 
-// NOTE(vim): The unnamed register is the system clipboard; these remember whether
-// the text we last put there was a linewise yank.
+// NOTE(vim): Like vim without clipboard=unnamed, yanks stay in vim's own registers and
+// "+ / "* are the system clipboard; these remember whether the text last put on the
+// clipboard was a linewise yank.
 global b32 vim_register_linewise = false;
 global u64 vim_register_size = 0;
 global Vim_Register vim_registers[VimRegisterCount] = {};
@@ -84,6 +86,11 @@ global b32 vim_search_backward = false;
 global b32 vim_search_whole_word = false;
 global b32 vim_search_highlight = false;
 global b32 vim_hlsearch = true;
+global b32 vim_ignorecase = true;
+global b32 vim_smartcase = true;
+global b32 vim_search_ignore_case = false;
+global i64 vim_scrolloff = 8;
+global b32 vim_escape_pending = false;
 
 global i64 vim_insert_count = 1;
 global i64 vim_insert_start = 0;
@@ -276,16 +283,24 @@ vim_register_slot(u8 reg){
     else if ('0' <= reg && reg <= '9'){
         result = &vim_registers[VimRegisterYank + (reg - '0')];
     }
+    else if (reg == 0 || reg == '"'){
+        result = &vim_registers[VimRegisterUnnamed];
+    }
     return(result);
 }
 
 function b32
-vim_register_is_valid(u8 reg){
-    return(vim_register_slot(reg) != 0 || reg == '"' || reg == '+' || reg == '*' || reg == '_');
+vim_register_is_clipboard(u8 reg){
+    return(reg == '+' || reg == '*');
 }
 
-// NOTE(vim): Every yank or delete goes to the unnamed register (the system clipboard)
-// plus, like vim, "0 for plain yanks, "1-"9 for multi line deletes and "a-"z when asked.
+function b32
+vim_register_is_valid(u8 reg){
+    return(vim_register_slot(reg) != 0 || vim_register_is_clipboard(reg) || reg == '_');
+}
+
+// NOTE(vim): Every yank or delete fills the unnamed register, plus "0 for plain yanks,
+// "1-"9 for multi line deletes, "a-"z when asked, and the system clipboard for "+ / "*.
 function void
 vim_yank(String_Const_u8 string, b32 linewise, b32 is_yank){
     u8 reg = vim_pending_register;
@@ -293,8 +308,13 @@ vim_yank(String_Const_u8 string, b32 linewise, b32 is_yank){
         return;
     }
 
-    Vim_Register *slot = vim_register_slot(reg);
-    if (slot != 0){
+    if (vim_register_is_clipboard(reg)){
+        clipboard_post(0, string);
+        vim_register_linewise = linewise;
+        vim_register_size = string.size;
+    }
+    else if (reg != 0 && reg != '"'){
+        Vim_Register *slot = vim_register_slot(reg);
         b32 append = ('A' <= reg && reg <= 'Z');
         vim_register_set(slot, string, linewise, append);
         string = slot->text;
@@ -313,9 +333,7 @@ vim_yank(String_Const_u8 string, b32 linewise, b32 is_yank){
         vim_register_set(&vim_registers[VimRegisterDelete], string, linewise, false);
     }
 
-    clipboard_post(0, string);
-    vim_register_linewise = linewise;
-    vim_register_size = string.size;
+    vim_register_set(&vim_registers[VimRegisterUnnamed], string, linewise, false);
 }
 
 function b32
@@ -329,7 +347,7 @@ vim_register_get(Application_Links *app, Arena *arena, u8 reg, String_Const_u8 *
             result = true;
         }
     }
-    else if (reg != '_'){
+    else if (vim_register_is_clipboard(reg)){
         clipboard_update_history_from_system(app, 0);
         if (clipboard_count(0) > 0){
             String_Const_u8 string = push_clipboard_index(arena, 0, 0);
@@ -558,17 +576,34 @@ vim_query(Application_Links *app, String_Const_u8 prompt, u8 *space, u64 cap, St
 ////////////////////////////////
 // NOTE(vim): Searching
 
+// NOTE(vim): ignorecase + smartcase: a pattern with an upper case letter matches case
+// sensitively. * and # (whole_word) follow ignorecase only, as in vim.
+function b32
+vim_pattern_ignores_case(String_Const_u8 pattern, b32 whole_word){
+    b32 result = vim_ignorecase;
+    if (result && vim_smartcase && !whole_word){
+        for (u64 i = 0; i < pattern.size; i += 1){
+            if (character_is_upper(pattern.str[i])){
+                result = false;
+                break;
+            }
+        }
+    }
+    return(result);
+}
+
 function void
 vim_set_search(String_Const_u8 string, b32 whole_word){
     u64 size = clamp_top(string.size, sizeof(vim_search_space));
     block_copy(vim_search_space, string.str, size);
     vim_search = SCu8(vim_search_space, size);
     vim_search_whole_word = whole_word;
+    vim_search_ignore_case = vim_pattern_ignores_case(vim_search, whole_word);
     vim_search_highlight = true;
 }
 
 function i64
-vim_search_needle(Application_Links *app, Buffer_ID buffer, i64 pos, b32 backward, String_Const_u8 needle, b32 whole_word){
+vim_search_needle(Application_Links *app, Buffer_ID buffer, i64 pos, b32 backward, String_Const_u8 needle, b32 whole_word, b32 ignore_case){
     i64 result = -1;
     if (needle.size > 0){
         i64 size = buffer_get_size(app, buffer);
@@ -577,18 +612,34 @@ vim_search_needle(Application_Links *app, Buffer_ID buffer, i64 pos, b32 backwar
         for (i32 i = 0; i < 100000; i += 1){
             i64 found = -1;
             if (!backward){
-                seek_string_forward(app, buffer, at, 0, needle, &found);
-                if (found >= size){
-                    seek_string_forward(app, buffer, -1, 0, needle, &found);
+                if (ignore_case){
+                    seek_string_insensitive_forward(app, buffer, at, 0, needle, &found);
+                    if (found >= size){
+                        seek_string_insensitive_forward(app, buffer, -1, 0, needle, &found);
+                    }
+                }
+                else{
+                    seek_string_forward(app, buffer, at, 0, needle, &found);
+                    if (found >= size){
+                        seek_string_forward(app, buffer, -1, 0, needle, &found);
+                    }
                 }
                 if (found >= size){
                     found = -1;
                 }
             }
             else{
-                seek_string_backward(app, buffer, at, 0, needle, &found);
-                if (found < 0){
-                    seek_string_backward(app, buffer, size, 0, needle, &found);
+                if (ignore_case){
+                    seek_string_insensitive_backward(app, buffer, at, 0, needle, &found);
+                    if (found < 0){
+                        seek_string_insensitive_backward(app, buffer, size, 0, needle, &found);
+                    }
+                }
+                else{
+                    seek_string_backward(app, buffer, at, 0, needle, &found);
+                    if (found < 0){
+                        seek_string_backward(app, buffer, size, 0, needle, &found);
+                    }
                 }
             }
             if (found < 0 || found == first){
@@ -609,7 +660,7 @@ vim_search_needle(Application_Links *app, Buffer_ID buffer, i64 pos, b32 backwar
 
 function i64
 vim_search_from(Application_Links *app, Buffer_ID buffer, i64 pos, b32 backward){
-    return(vim_search_needle(app, buffer, pos, backward, vim_search, vim_search_whole_word));
+    return(vim_search_needle(app, buffer, pos, backward, vim_search, vim_search_whole_word, vim_search_ignore_case));
 }
 
 // NOTE(vim): Incremental / and ? prompt: the cursor follows the first match while typing.
@@ -679,7 +730,8 @@ vim_search_prompt(Application_Links *app, View_ID view, Buffer_ID buffer, b32 ba
                 }
             }
             if (changed){
-                i64 match = vim_search_needle(app, buffer, origin, backward, bar.string, false);
+                i64 match = vim_search_needle(app, buffer, origin, backward, bar.string, false,
+                                              vim_pattern_ignores_case(bar.string, false));
                 if (match >= 0){
                     view_set_cursor(app, view, seek_pos(match));
                     view_set_highlight_range(app, view, Ii64_size(match, bar.string.size));
@@ -1173,6 +1225,46 @@ vim_motion(Application_Links *app, View_ID view, Buffer_ID buffer, u8 c, i32 cou
     }
 
     return(m);
+}
+
+global View_ID vim_scrolloff_view = 0;
+global i64 vim_scrolloff_pos = -1;
+
+// NOTE(vim): scrolloff: after the cursor moves, scroll so that many lines stay visible
+// above and below it.
+function void
+vim_apply_scrolloff(Application_Links *app){
+    View_ID view = get_active_view(app, Access_Always);
+    Buffer_ID buffer = view_get_buffer(app, view, Access_Always);
+    i64 pos = view_get_cursor_pos(app, view);
+    if (vim_scrolloff <= 0 || (view == vim_scrolloff_view && pos == vim_scrolloff_pos)){
+        return;
+    }
+    vim_scrolloff_view = view;
+    vim_scrolloff_pos = pos;
+    Rect_f32 region = view_get_buffer_region(app, view);
+    f32 line_height = get_view_line_height(app, view);
+    i64 rows = (i64)(rect_height(region)/line_height);
+    i64 margin = clamp_top(vim_scrolloff, (rows - 1)/2);
+    if (rows <= 0 || margin <= 0){
+        return;
+    }
+    Buffer_Scroll scroll = view_get_buffer_scroll(app, view);
+    i64 top = scroll.target.line_number;
+    i64 line = vim_line_of(app, buffer, pos);
+    i64 new_top = top;
+    if (line < top + margin){
+        new_top = line - margin;
+    }
+    else if (line > top + rows - 1 - margin){
+        new_top = line - rows + 1 + margin;
+    }
+    new_top = clamp(1, new_top, clamp_bot(1, vim_line_count(app, buffer)));
+    if (new_top != top){
+        scroll.target.line_number = new_top;
+        scroll.target.pixel_shift.y = 0.f;
+        view_set_buffer_scroll(app, view, scroll, SetBufferScroll_NoCursorChange);
+    }
 }
 
 // NOTE(vim): j/k move by buffer lines, not wrapped screen rows, and remember the column
@@ -2003,7 +2095,6 @@ vim_substitute(Application_Links *app, View_ID view, Buffer_ID buffer, Range_i64
     String_Const_u8 needle = vim_ex_take_part(scratch, &rest, delim);
     String_Const_u8 replacement = vim_ex_take_part(scratch, &rest, delim);
     b32 global_flag = (string_find_first(rest, 'g') < rest.size);
-    b32 ignore_case = (string_find_first(rest, 'i') < rest.size);
     if (needle.size == 0){
         needle = push_string_copy(scratch, vim_search);
     }
@@ -2011,6 +2102,14 @@ vim_substitute(Application_Links *app, View_ID view, Buffer_ID buffer, Range_i64
         return(true);
     }
     vim_set_search(needle, false);
+    // NOTE(vim): ignorecase/smartcase apply, the i and I flags override them.
+    b32 ignore_case = vim_search_ignore_case;
+    if (string_find_first(rest, 'i') < rest.size){
+        ignore_case = true;
+    }
+    else if (string_find_first(rest, 'I') < rest.size){
+        ignore_case = false;
+    }
 
     i32 total = 0;
     i64 first_line = 0;
@@ -2076,6 +2175,16 @@ vim_ex_set(Application_Links *app, View_ID view, Buffer_ID buffer, String_Const_
     }
     else if (VimSet("nohls") || VimSet("nohlsearch")){
         vim_hlsearch = false;
+    }
+    else if (VimSet("ic") || VimSet("ignorecase") || VimSet("noic") || VimSet("noignorecase")){
+        vim_ignorecase = (arg.str[0] != 'n');
+    }
+    else if (VimSet("scs") || VimSet("smartcase") || VimSet("noscs") || VimSet("nosmartcase")){
+        vim_smartcase = (arg.str[0] != 'n');
+    }
+    else if (string_match(string_prefix(arg, 3), string_u8_litexpr("so=")) ||
+             string_match(string_prefix(arg, 10), string_u8_litexpr("scrolloff="))){
+        vim_scrolloff = (i64)string_to_integer(string_skip(arg, string_find_first(arg, '=') + 1), 10);
     }
     else{
         print_message(app, push_u8_stringf(scratch, "vim: unknown option: %.*s\n", string_expand(arg)));
@@ -2241,6 +2350,21 @@ vim_execute_ex(Application_Links *app, View_ID view, Buffer_ID buffer, String_Co
     else if (VimEx("LspDiagnostics")){
         lsp_list_diagnostics(app);
     }
+    else if (VimEx("Format") || VimEx("LspFormat")){
+        lsp_format(app);
+    }
+    else if (VimEx("OrganizeImports")){
+        lsp_organize_imports(app);
+    }
+    else if (VimEx("LspRename")){
+        lsp_rename(app);
+    }
+    else if (VimEx("Gstatus") || VimEx("Git")){
+        git_status_files(app);
+    }
+    else if (VimEx("Gblame")){
+        git_blame_line(app);
+    }
     else if (VimEx("make") || VimEx("mak")){
         build_in_build_panel(app);
     }
@@ -2270,42 +2394,144 @@ vim_ex_command(Application_Links *app, View_ID view, Buffer_ID buffer, String_Co
 }
 
 function void
+vim_grep_word(Application_Links *app){
+    // NOTE(vim): Also make it the search pattern, so n and N work in the opened file.
+    View_ID view = get_active_view(app, Access_ReadVisible);
+    Buffer_ID buffer = view_get_buffer(app, view, Access_ReadVisible);
+    Scratch_Block scratch(app);
+    Range_i64 word = enclose_pos_alpha_numeric_underscore(app, buffer, view_get_cursor_pos(app, view));
+    String_Const_u8 string = push_buffer_range(app, scratch, buffer, word);
+    if (string.size > 0){
+        vim_set_search(string, true);
+        vim_search_backward = false;
+    }
+    fuzzy_grep_identifier(app);
+}
+
+// NOTE(vim): 4coder's file browser starting in a folder (the vimrc's Space e / Space E
+// open NERDTree there).
+function void
+vim_browse_files(Application_Links *app, String_Const_u8 dir){
+    Scratch_Block scratch(app);
+    set_hot_directory(app, push_u8_stringf(scratch, "%.*s/", string_expand(dir)));
+    interactive_open_or_new(app);
+}
+
+// NOTE(vim): Space is the leader, laid out like the user's vimrc. A few extra single keys
+// (b, x, w, k, r, n, p, l) do not collide with it.
+function void
 vim_leader(Application_Links *app){
     u8 c = 0;
     if (!vim_read_char(app, &c)){
         return;
     }
+    u8 c2 = 0;
     switch (c){
-        case 'f': fuzzy_find_file(app); break;
-        case 'e': interactive_open_or_new(app); break;
-        case 'b': fuzzy_switch_buffer(app); break;
-        case '/': case 'g': fuzzy_grep(app); break;
-        case '*':
+        case 'i': lsp_list_diagnostics(app); break;
+        case 'o': lsp_document_symbols(app); break;
+        case 'e':
         {
-            // NOTE(vim): Also make it the search pattern, so n and N work in the opened file.
-            View_ID view = get_active_view(app, Access_ReadVisible);
-            Buffer_ID buffer = view_get_buffer(app, view, Access_ReadVisible);
             Scratch_Block scratch(app);
-            Range_i64 word = enclose_pos_alpha_numeric_underscore(app, buffer, view_get_cursor_pos(app, view));
-            String_Const_u8 string = push_buffer_range(app, scratch, buffer, word);
-            if (string.size > 0){
-                vim_set_search(string, true);
-                vim_search_backward = false;
-            }
-            fuzzy_grep_identifier(app);
+            vim_browse_files(app, fuzzy_search_root(app, scratch));
         }break;
-        case 'k': interactive_kill_buffer(app); break;
+        case 'E':
+        {
+            Scratch_Block scratch(app);
+            String_Const_u8 cwd = system_get_path(scratch, SystemPath_CurrentDirectory);
+            vim_browse_files(app, string_chop(cwd, 1));
+        }break;
+        
+        case 'f':
+        {
+            if (vim_read_char(app, &c2)){
+                switch (c2){
+                    case 't': open_terminal_root(app); break;
+                    case 'T': open_terminal_cwd(app); break;
+                }
+            }
+        }break;
+        
+        case 'b': fuzzy_switch_buffer(app); break;
         case 'x': command_lister(app); break;
         case 'w': save(app); break;
-        case 'm': build_in_build_panel(app); break;
+        case 'k': interactive_kill_buffer(app); break;
+        case 'r': lsp_find_references(app); break;
         case 'n': goto_next_jump(app); break;
         case 'p': goto_prev_jump(app); break;
-        case 'd': lsp_goto_definition(app); break;
-        case 'q': lsp_list_diagnostics(app); break;
-        case 'r': lsp_find_references(app); break;
-        case 's': list_all_locations(app); break;
         case 'l': list_all_functions_current_buffer_lister(app); break;
-        case 'o': change_active_panel(app); break;
+        
+        case ' ':
+        {
+            if (vim_read_char(app, &c2)){
+                switch (c2){
+                    case 's': fuzzy_grep(app); break;
+                    case 't': fuzzy_grep_here(app); break;
+                }
+            }
+        }break;
+        
+        case 'c':
+        {
+            if (vim_read_char(app, &c2)){
+                switch (c2){
+                    case 'a': lsp_code_actions(app); break;
+                    case 'r': lsp_rename(app); break;
+                    case 'f': lsp_format(app); break;
+                    case 'l': print_message(app, string_u8_litexpr("vim: code lens is not supported yet\n")); break;
+                }
+            }
+        }break;
+        
+        case 's':
+        {
+            if (vim_read_char(app, &c2)){
+                switch (c2){
+                    case 's': lsp_document_symbols(app); break;
+                    case 'S': lsp_workspace_symbols(app); break;
+                    case 'r': vim_grep_word(app); break;
+                }
+            }
+        }break;
+        
+        case 'm':
+        {
+            if (vim_read_char(app, &c2)){
+                switch (c2){
+                    case 's': fuzzy_find_file(app); break;
+                    case 't': fuzzy_find_file_here(app); break;
+                }
+            }
+        }break;
+        
+        case 'g':
+        {
+            if (vim_read_char(app, &c2)){
+                switch (c2){
+                    case 'g': git_lazygit(app); break;
+                    case 'l': git_lazygit_log(app); break;
+                    case 'L': git_lazygit_log_cwd(app); break;
+                    case 'f': git_lazygit_file(app); break;
+                    case 'b': git_blame_line(app); break;
+                    case 'h':
+                    {
+                        u8 c3 = 0;
+                        if (vim_read_char(app, &c3)){
+                            switch (c3){
+                                case 's': git_stage_hunk(app); break;
+                                case 'r': git_reset_hunk(app); break;
+                                case 'p': git_preview_hunk(app); break;
+                            }
+                        }
+                    }break;
+                }
+            }
+        }break;
+        
+        case 't':
+        {
+            vim_read_char(app, &c2);
+            print_message(app, string_u8_litexpr("vim: the test runner keys are not supported yet\n"));
+        }break;
     }
 }
 
@@ -2368,6 +2594,7 @@ vim_log_last_line_start(Application_Links *app){
 // NOTE(vim): Mode dispatch
 
 function void vim_repeat_change(Application_Links *app, View_ID view, Buffer_ID buffer, i32 count);
+function u8 vim_execute(Application_Links *app, View_ID view, Buffer_ID buffer, u8 c);
 function void vim_leave_insert(Application_Links *app, View_ID view, Buffer_ID buffer);
 
 function void
@@ -2439,12 +2666,28 @@ vim_normal(Application_Links *app, View_ID view, Buffer_ID buffer, u8 c, i32 cou
         }break;
 
         // NOTE(vim): Y yanks to the end of the line, as in Neovim.
-        case 'D': case 'C': case 'Y':
+        case 'D': case 'C':
         {
             i64 target = vim_clamp_line(app, buffer, line + n - 1);
             Range_i64 range = Ii64(pos, vim_line_end(app, buffer, target));
-            u8 op = (c == 'D')?'d':((c == 'C')?'c':'y');
-            vim_apply_operator(app, view, buffer, op, range, false);
+            vim_apply_operator(app, view, buffer, (c == 'D')?'d':'c', range, false);
+        }break;
+
+        // NOTE(vim): Y is yy; the vimrc maps YY to "+yy (copy the line to the system clipboard).
+        case 'Y':
+        {
+            u8 c2 = 0;
+            b32 has_next = vim_read_char(app, &c2);
+            if (has_next && c2 == 'Y'){
+                vim_pending_register = '+';
+                vim_apply_operator(app, view, buffer, 'y', Ii64(line, line + n - 1), true);
+            }
+            else{
+                vim_apply_operator(app, view, buffer, 'y', Ii64(line, line + n - 1), true);
+                if (has_next){
+                    vim_execute(app, view, buffer, c2);
+                }
+            }
         }break;
 
         case 'S':
@@ -2562,10 +2805,22 @@ vim_normal(Application_Links *app, View_ID view, Buffer_ID buffer, u8 c, i32 cou
                         vim_push_jump(app, view, buffer);
                         vim_set_cursor_line(app, view, buffer, (count > 0)?count:1);
                     }break;
+                    // NOTE(vim): The vimrc maps ge/gE to definition/declaration in language server
+                    // buffers; elsewhere they are the usual backward word end motions.
                     case 'e': case 'E':
                     {
-                        for (i32 i = 0; i < n; i += 1){
-                            vim_set_cursor(app, view, vim_prev_word_end(app, buffer, view_get_cursor_pos(app, view), (c2 == 'E')));
+                        if (lsp_document_from_buffer(buffer) != 0){
+                            if (c2 == 'e'){
+                                lsp_goto_definition(app);
+                            }
+                            else{
+                                lsp_goto_declaration(app);
+                            }
+                        }
+                        else{
+                            for (i32 i = 0; i < n; i += 1){
+                                vim_set_cursor(app, view, vim_prev_word_end(app, buffer, view_get_cursor_pos(app, view), (c2 == 'E')));
+                            }
                         }
                     }break;
                     case '_':
@@ -2575,7 +2830,12 @@ vim_normal(Application_Links *app, View_ID view, Buffer_ID buffer, u8 c, i32 cou
                         vim_set_cursor(app, view, clamp_bot(get_line_start_pos(app, buffer, line), end - 1));
                     }break;
                     case 'd': lsp_goto_definition(app); break;
-                    case 'r': lsp_find_references(app); break;
+                    case 'D': lsp_goto_declaration(app); break;
+                    case 'r': case 'n': lsp_find_references(app); break;
+                    case 'I': lsp_goto_implementation(app); break;
+                    case 'y': lsp_goto_type_definition(app); break;
+                    case 'h': lsp_hover(app); break;
+                    case 'K': lsp_signature_help(app); break;
                     case 'c':
                     {
                         u8 c3 = 0;
@@ -2638,17 +2898,23 @@ vim_normal(Application_Links *app, View_ID view, Buffer_ID buffer, u8 c, i32 cou
             }
         }break;
 
+        // NOTE(vim): The vimrc maps K to E; hover is gh.
         case 'K':
         {
-            lsp_hover(app);
+            vim_move(app, view, buffer, 'E', count);
         }break;
 
         // NOTE(vim): ]d and [d move between language server diagnostics.
+        // NOTE(vim): ]d / [d diagnostics, ]h / [h git changes.
         case ']': case '[':
         {
             u8 c2 = 0;
-            if (vim_read_char(app, &c2) && c2 == 'd'){
-                lsp_goto_diagnostic(app, (c == ']'));
+            b32 forward = (c == ']');
+            if (vim_read_char(app, &c2)){
+                switch (c2){
+                    case 'd': lsp_goto_diagnostic(app, forward, 0, false); break;
+                    case 'h': git_goto_hunk(app, forward); break;
+                }
             }
         }break;
 
@@ -2702,7 +2968,12 @@ vim_visual(Application_Links *app, View_ID view, Buffer_ID buffer, u8 c, i32 cou
         case 'c': case 's': {op = 'c';}break;
         case '>': case '<': case '=': case '~': case 'u': case 'U': case 'J': {op = c;}break;
         case 'D': case 'X': {op = 'd'; linewise = true;}break;
-        case 'Y': {op = 'y'; linewise = true;}break;
+        case 'Y':
+        {
+            // NOTE(vim): The vimrc maps visual Y to "+y.
+            op = 'y';
+            vim_pending_register = '+';
+        }break;
         case 'C': case 'S': case 'R': {op = 'c'; linewise = true;}break;
     }
 
@@ -2953,6 +3224,7 @@ CUSTOM_DOC("Interprets typed text as a vim normal or visual mode command.")
     }
     u8 c = text.str[0];
 
+    vim_escape_pending = false;
     i64 log_line_start = vim_log_last_line_start(app);
     Vim_Mode mode_before = vim_mode;
     History_Record_Index history_before = buffer_history_get_current_state_index(app, buffer);
@@ -2998,10 +3270,20 @@ CUSTOM_DOC("Leaves insert, replace or visual mode and returns to vim normal mode
     View_ID view = get_active_view(app, Access_ReadVisible);
     Buffer_ID buffer = view_get_buffer(app, view, Access_ReadVisible);
     lsp_close_popup();
+    lsp_completion_close();
+    lsp_signature_close();
+    lsp_snippet_close(app);
     if (vim_mode == VimMode_Insert || vim_mode == VimMode_Replace){
         vim_leave_insert(app, view, buffer);
     }
     else{
+        // NOTE(vim): The vimrc maps <Esc><Esc> in normal mode to :nohlsearch.
+        if (vim_mode == VimMode_Normal){
+            if (vim_escape_pending){
+                vim_search_highlight = false;
+            }
+            vim_escape_pending = !vim_escape_pending;
+        }
         vim_set_mode(app, view, VimMode_Normal);
         if (buffer != 0){
             vim_clamp_cursor(app, view, buffer);
@@ -3170,6 +3452,7 @@ CUSTOM_DOC("Vim <c-w> prefix for panel commands.")
         case 'v': case VimCtrl('v'): open_panel_vsplit(app); break;
         case 'q': case 'c': close_panel(app); break;
         case 'x': swap_panels(app); break;
+        case 'd': lsp_show_line_diagnostics(app); break;
     }
 }
 
@@ -3265,6 +3548,125 @@ CUSTOM_DOC("Vim insert mode <c-r>{register}, inserts the contents of a register.
 }
 
 ////////////////////////////////
+// NOTE(vim): Insert mode completion keys
+
+// NOTE(vim): Typed text goes through 4coder's normal insert (auto indent included) and then
+// drives completion and signature help.
+CUSTOM_COMMAND_SIG(vim_insert_text)
+CUSTOM_DOC("Inserts typed text in vim insert mode and updates completion and signature help.")
+{
+    User_Input in = get_current_input(app);
+    String_Const_u8 text = to_writable(&in.event);
+    lsp_snippet_before_insert(app);
+    Implicit_Map_Result fallback = default_implicit_map(app, 0, 0, &in.event);
+    if (fallback.command != 0){
+        fallback.command(app);
+    }
+    lsp_completion_on_insert(app, text);
+}
+
+CUSTOM_COMMAND_SIG(vim_insert_backspace)
+CUSTOM_DOC("Vim insert mode backspace; on a snippet placeholder it clears the placeholder.")
+{
+    if (lsp_snippet_count > 0 && lsp_snippet_pending_replace){
+        lsp_snippet_before_insert(app);
+    }
+    else{
+        backspace_char(app);
+    }
+    lsp_completion_on_backspace(app);
+}
+
+CUSTOM_COMMAND_SIG(vim_insert_down)
+CUSTOM_DOC("Selects the next completion, or moves down a line.")
+{
+    if (lsp_completion_visible){
+        lsp_completion_move(1);
+    }
+    else{
+        move_down(app);
+    }
+}
+
+CUSTOM_COMMAND_SIG(vim_insert_up)
+CUSTOM_DOC("Selects the previous completion, or moves up a line.")
+{
+    if (lsp_completion_visible){
+        lsp_completion_move(-1);
+    }
+    else{
+        move_up(app);
+    }
+}
+
+function void
+vim_insert_complete_or_move(Application_Links *app, i32 delta){
+    if (lsp_completion_visible){
+        lsp_completion_move(delta);
+    }
+    else if (!lsp_completion_trigger(app)){
+        word_complete(app);
+    }
+}
+
+CUSTOM_COMMAND_SIG(vim_insert_next)
+CUSTOM_DOC("Vim insert <c-n>: next completion, opening the menu if needed.")
+{
+    vim_insert_complete_or_move(app, 1);
+}
+
+CUSTOM_COMMAND_SIG(vim_insert_prev)
+CUSTOM_DOC("Vim insert <c-p>: previous completion, opening the menu if needed.")
+{
+    vim_insert_complete_or_move(app, -1);
+}
+
+CUSTOM_COMMAND_SIG(vim_insert_accept)
+CUSTOM_DOC("Insert <c-y>: accepts the selected completion.")
+{
+    lsp_completion_accept(app);
+}
+
+CUSTOM_COMMAND_SIG(vim_insert_close_menu)
+CUSTOM_DOC("Insert <c-e>: closes the completion menu.")
+{
+    lsp_completion_close();
+}
+
+// NOTE(vim): The vimrc's completion keys: Tab and S-Tab walk the menu, Enter accepts only an
+// item that was selected and is a plain line break otherwise.
+CUSTOM_COMMAND_SIG(vim_insert_return)
+CUSTOM_DOC("Insert <cr>: accepts the selected completion, otherwise breaks the line.")
+{
+    if (!lsp_completion_accept(app)){
+        lsp_completion_close();
+        leave_current_input_unhandled(app);
+    }
+}
+
+CUSTOM_COMMAND_SIG(vim_insert_shift_tab)
+CUSTOM_DOC("Insert <s-tab>: selects the previous completion.")
+{
+    if (lsp_completion_visible){
+        lsp_completion_move(-1);
+    }
+    else{
+        leave_current_input_unhandled(app);
+    }
+}
+
+CUSTOM_COMMAND_SIG(vim_insert_tab)
+CUSTOM_DOC("Insert <tab>: selects the next completion, or jumps to the next snippet placeholder, otherwise types a tab.")
+{
+    if (lsp_completion_visible){
+        lsp_completion_move(1);
+    }
+    else if (!lsp_snippet_next(app)){
+        leave_current_input_unhandled(app);
+    }
+}
+
+////////////////////////////////
 // NOTE(vim): Rendering
 
 function String_Const_u8
@@ -3279,7 +3681,9 @@ vim_mode_label(void){
     return(result);
 }
 
-function void
+// NOTE(vim): Draws the mode and language server labels at the right of the bar and returns
+// where they start.
+function f32
 vim_draw_mode_label(Application_Links *app, Face_ID face_id, Buffer_ID buffer, Rect_f32 bar){
     Scratch_Block scratch(app);
     String_Const_u8 label = vim_mode_label();
@@ -3290,12 +3694,14 @@ vim_draw_mode_label(Application_Links *app, Face_ID face_id, Buffer_ID buffer, R
     Rect_f32 box = Rf32(bar.x1 - width, bar.y0, bar.x1, bar.y1);
 
     // NOTE(vim): Language server status and error/warning counts, left of the mode.
+    f32 x = box.x0;
     String_Const_u8 lsp_label = lsp_status_label(app, scratch, buffer);
     if (lsp_label.size > 0){
-        f32 lsp_width = get_string_advance(app, face_id, lsp_label);
-        Rect_f32 lsp_box = Rf32(box.x0 - lsp_width, bar.y0, box.x0, bar.y1);
-        draw_rectangle_fcolor(app, lsp_box, 0.f, fcolor_id(defcolor_margin_active));
-        draw_string(app, face_id, lsp_label, V2f32(lsp_box.x0, lsp_box.y0 + 2.f), fcolor_resolve(fcolor_id(defcolor_base)));
+        f32 label_width = get_string_advance(app, face_id, lsp_label);
+        Rect_f32 label_box = Rf32(x - label_width, bar.y0, x, bar.y1);
+        draw_rectangle_fcolor(app, label_box, 0.f, fcolor_id(defcolor_margin_active));
+        draw_string(app, face_id, lsp_label, V2f32(label_box.x0, label_box.y0 + 2.f), fcolor_resolve(fcolor_id(defcolor_base)));
+        x = label_box.x0;
     }
 
     FColor back = fcolor_id(defcolor_keyword);
@@ -3305,6 +3711,114 @@ vim_draw_mode_label(Application_Links *app, Face_ID face_id, Buffer_ID buffer, R
     }
     draw_rectangle_fcolor(app, box, 0.f, back);
     draw_string(app, face_id, label, V2f32(box.x0, box.y0 + 2.f), fcolor_resolve(fcolor_id(defcolor_back)));
+    return(x);
+}
+
+// NOTE(vim): Visual mode selection size, as the vimrc's status line shows it:
+// "3 lines  120 chars (98 no spaces)"; line breaks are not counted.
+function String_Const_u8
+vim_selection_label(Application_Links *app, Arena *arena, View_ID view, Buffer_ID buffer){
+    String_Const_u8 result = {};
+    if (vim_mode_is_visual(vim_mode)){
+        Range_i64 range = Ii64(view_get_cursor_pos(app, view), view_get_mark_pos(app, view));
+        i64 lines = vim_line_of(app, buffer, range.max) - vim_line_of(app, buffer, range.min) + 1;
+        if (vim_mode == VimMode_VisualLine){
+            range = Ii64(get_line_start_pos(app, buffer, vim_line_of(app, buffer, range.min)),
+                         vim_line_end(app, buffer, vim_line_of(app, buffer, range.max)));
+        }
+        else{
+            range.max = clamp_top(range.max + 1, buffer_get_size(app, buffer));
+        }
+        range.max = clamp_top(range.max, range.min + MB(1));
+        String_Const_u8 text = push_buffer_range(app, arena, buffer, range);
+        i64 chars = 0;
+        i64 no_spaces = 0;
+        for (u64 i = 0; i < text.size; i += 1){
+            u8 c = text.str[i];
+            if (c == '\n' || c == '\r' || (c & 0xC0) == 0x80){
+                continue;
+            }
+            chars += 1;
+            if (c != ' ' && c != '\t'){
+                no_spaces += 1;
+            }
+        }
+        if (lines > 1){
+            result = push_u8_stringf(arena, "%lld lines  %lld chars (%lld no spaces)   ", lines, chars, no_spaces);
+        }
+        else{
+            result = push_u8_stringf(arena, "%lld chars (%lld no spaces)   ", chars, no_spaces);
+        }
+    }
+    return(result);
+}
+
+// NOTE(vim): The file bar follows the vimrc's status line: modified flag, path from the git
+// root, Git:branch with colored +added ~changed -removed counts on the left; selection
+// size, line:column and file type on the right, before the mode label.
+function void
+vim_draw_file_bar(Application_Links *app, View_ID view_id, Buffer_ID buffer, Face_ID face_id, Rect_f32 bar, b32 is_active){
+    Scratch_Block scratch(app);
+    draw_rectangle_fcolor(app, bar, 0.f, fcolor_id(defcolor_bar));
+    FColor base = fcolor_id(defcolor_base);
+
+    Dirty_State dirty = buffer_get_dirty_state(app, buffer);
+    b32 read_only = (view_get_buffer(app, view_id, Access_ReadWriteVisible) == 0);
+    String_Const_u8 flag = string_u8_litexpr("--");
+    if (HasFlag(dirty, DirtyState_UnsavedChanges)){
+        flag = string_u8_litexpr("**");
+    }
+    else if (read_only){
+        flag = string_u8_litexpr("%%");
+    }
+
+    Git_Buffer *git = git_buffer_state(buffer);
+    String_Const_u8 path = push_buffer_file_name(app, scratch, buffer);
+    if (git != 0 && git->root.size > 0){
+        path = git->path;
+    }
+    else if (path.size > 0){
+        char *home = getenv("HOME");
+        String_Const_u8 home_string = SCu8(home);
+        if (home != 0 && string_match(string_prefix(path, home_string.size), home_string)){
+            path = push_u8_stringf(scratch, "~%.*s", string_expand(string_skip(path, home_string.size)));
+        }
+    }
+    else{
+        path = push_buffer_unique_name(app, scratch, buffer);
+    }
+
+    Fancy_Line line = {};
+    push_fancy_stringf(scratch, &line, base, " %.*s %.*s", string_expand(flag), string_expand(path));
+    if (git != 0 && git->tracked && git->branch.size > 0){
+        push_fancy_stringf(scratch, &line, base, "   Git:%.*s", string_expand(git->branch));
+        i64 counts[3] = {git->added, git->modified, git->removed};
+        char signs[3] = {'+', '~', '-'};
+        Managed_ID ids[3] = {defcolor_git_bar_added, defcolor_git_bar_modified, defcolor_git_bar_removed};
+        ARGB_Color fallbacks[3] = {0xFF73BD79, 0xFF70AEFF, 0xFFF75464};
+        for (i32 i = 0; i < 3; i += 1){
+            if (counts[i] > 0){
+                FColor color = base;
+                if (is_active){
+                    color = fcolor_argb(git_theme_color(ids[i], fallbacks[i]));
+                }
+                push_fancy_stringf(scratch, &line, color, " %c%lld", signs[i], counts[i]);
+            }
+        }
+    }
+    draw_fancy_line(app, face_id, fcolor_zero(), &line, bar.p0 + V2f32(2.f, 2.f));
+
+    f32 right = bar.x1;
+    if (is_active){
+        right = vim_draw_mode_label(app, face_id, buffer, bar);
+    }
+    Buffer_Cursor cursor = view_compute_cursor(app, view_id, seek_pos(view_get_cursor_pos(app, view_id)));
+    String_Const_u8 file_type = string_file_extension(push_buffer_file_name(app, scratch, buffer));
+    String_Const_u8 info = push_u8_stringf(scratch, "%.*s%lld:%lld%s%.*s ",
+                                           string_expand(is_active?vim_selection_label(app, scratch, view_id, buffer):string_u8_empty),
+                                           cursor.line, cursor.col, (file_type.size > 0)?"   ":"", string_expand(file_type));
+    f32 width = get_string_advance(app, face_id, info);
+    draw_string(app, face_id, info, V2f32(right - width, bar.y0 + 2.f), fcolor_resolve(base));
 }
 
 function void
@@ -3314,7 +3828,7 @@ vim_draw_search_highlight(Application_Links *app, Buffer_ID buffer, Text_Layout_
         Range_i64 visible_range = text_layout_get_visible_range(app, text_layout_id);
         String_Const_u8 text = push_buffer_range(app, scratch, buffer, visible_range);
         for (u64 i = 0; i + vim_search.size <= text.size; i += 1){
-            if (vim_match_at(text, i, vim_search, false)){
+            if (vim_match_at(text, i, vim_search, vim_search_ignore_case)){
                 i64 pos = visible_range.min + i;
                 if (!vim_search_whole_word || vim_is_whole_word(app, buffer, pos, vim_search.size)){
                     draw_character_block(app, text_layout_id, Ii64_size(pos, vim_search.size), roundness,
@@ -3474,6 +3988,7 @@ vim_render_buffer(Application_Links *app, View_ID view_id, Face_ID face_id,
     // NOTE(vim): Search matches and cursor
     vim_draw_search_highlight(app, buffer, text_layout_id, cursor_roundness);
     lsp_draw_diagnostics(app, buffer, text_layout_id, face_id);
+    lsp_draw_snippet(app, buffer, text_layout_id, cursor_roundness);
     vim_draw_cursor(app, view_id, is_active_view, buffer, text_layout_id, cursor_roundness, mark_thickness);
 
     // NOTE(allen): Fade ranges
@@ -3484,6 +3999,8 @@ vim_render_buffer(Application_Links *app, View_ID view_id, Face_ID face_id,
 
     // NOTE(vim): Hover docs and diagnostic messages float over the text.
     lsp_draw_popup(app, view_id, text_layout_id, face_id, rect);
+    lsp_draw_signature(app, view_id, text_layout_id, face_id, rect);
+    lsp_draw_completion(app, view_id, text_layout_id, face_id, rect);
 
     draw_set_clip(app, prev_clip);
 }
@@ -3508,10 +4025,7 @@ vim_render_caller(Application_Links *app, Frame_Info frame_info, View_ID view_id
     b64 showing_file_bar = false;
     if (view_get_setting(app, view_id, ViewSetting_ShowFileBar, &showing_file_bar) && showing_file_bar){
         Rect_f32_Pair pair = layout_file_bar_on_top(region, line_height);
-        draw_file_bar(app, view_id, buffer, face_id, pair.min);
-        if (is_active_view){
-            vim_draw_mode_label(app, face_id, buffer, pair.min);
-        }
+        vim_draw_file_bar(app, view_id, buffer, face_id, pair.min, is_active_view);
         region = pair.max;
     }
 
@@ -3547,6 +4061,16 @@ vim_render_caller(Application_Links *app, Frame_Info frame_info, View_ID view_id
         region = pair.max;
     }
 
+    // NOTE(vim): git change signs between the line numbers and the text; like signcolumn=yes
+    // the column is always there for files, so text does not shift when changes appear.
+    b32 show_git_signs = !buffer_has_name_with_star(app, buffer);
+    Rect_f32 git_sign_rect = {};
+    if (show_git_signs){
+        Rect_f32_Pair pair = rect_split_left_right(region, clamp_bot(4.f, digit_advance*0.5f));
+        git_sign_rect = pair.min;
+        region = pair.max;
+    }
+
     // NOTE(allen): begin buffer render
     Buffer_Point buffer_point = scroll.position;
     Text_Layout_ID text_layout_id = text_layout_create(app, buffer, region, buffer_point);
@@ -3554,6 +4078,9 @@ vim_render_caller(Application_Links *app, Frame_Info frame_info, View_ID view_id
     // NOTE(allen): draw line numbers
     if (show_line_number_margins){
         draw_line_number_margin(app, view_id, buffer, face_id, text_layout_id, line_number_rect);
+    }
+    if (show_git_signs){
+        git_draw_signs(app, buffer, text_layout_id, git_sign_rect);
     }
 
     // NOTE(allen): draw the buffer
@@ -3580,6 +4107,11 @@ vim_implicit_map(Application_Links *app, String_ID lang, String_ID mode, Input_E
     Command_Binding binding = map_get_binding_recursive(&vim_mapping, map_id, event);
     if (binding.custom != 0){
         result.command = binding.custom;
+        return(result);
+    }
+
+    if (vim_mode == VimMode_Insert && event->kind == InputEventKind_TextInsert){
+        result.command = vim_insert_text;
         return(result);
     }
 
@@ -3611,6 +4143,9 @@ vim_setup_mapping(Mapping *mapping){
     SelectMap(vim_map_normal);
     Bind(vim_normal_mode,        KeyCode_Escape);
     Bind(vim_return,             KeyCode_Return);
+    Bind(change_active_panel,    KeyCode_Tab);
+    Bind(lsp_workspace_symbols,  KeyCode_F2);
+    Bind(lsp_document_symbols,   KeyCode_F4);
     Bind(vim_left,               KeyCode_Backspace);
     Bind(vim_delete_char,        KeyCode_Delete);
     Bind(vim_left,               KeyCode_Left);
@@ -3643,12 +4178,22 @@ vim_setup_mapping(Mapping *mapping){
     Bind(vim_normal_mode,        KeyCode_LeftBracket, KeyCode_Control);
     Bind(vim_insert_delete_word, KeyCode_W, KeyCode_Control);
     Bind(vim_insert_delete_line, KeyCode_U, KeyCode_Control);
-    Bind(backspace_char,         KeyCode_H, KeyCode_Control);
+    Bind(vim_insert_backspace,   KeyCode_H, KeyCode_Control);
+    Bind(vim_normal_mode,        KeyCode_C, KeyCode_Control);
     Bind(vim_insert_register,    KeyCode_R, KeyCode_Control);
     Bind(vim_insert_indent,      KeyCode_T, KeyCode_Control);
     Bind(vim_insert_dedent,      KeyCode_D, KeyCode_Control);
-    Bind(word_complete,          KeyCode_N, KeyCode_Control);
-    Bind(word_complete,          KeyCode_P, KeyCode_Control);
+    Bind(vim_insert_next,        KeyCode_N, KeyCode_Control);
+    Bind(vim_insert_prev,        KeyCode_P, KeyCode_Control);
+    Bind(vim_insert_accept,      KeyCode_Y, KeyCode_Control);
+    Bind(vim_insert_close_menu,  KeyCode_E, KeyCode_Control);
+    Bind(vim_insert_backspace,   KeyCode_Backspace);
+    Bind(vim_insert_up,          KeyCode_Up);
+    Bind(vim_insert_down,        KeyCode_Down);
+    Bind(vim_insert_tab,         KeyCode_Tab);
+    Bind(vim_insert_shift_tab,   KeyCode_Tab, KeyCode_Shift);
+    Bind(vim_insert_return,      KeyCode_Return);
+    Bind(lsp_signature_help,     KeyCode_K, KeyCode_Control);
 
     SelectMap(vim_map_replace);
     ParentMap(vim_map_insert);
