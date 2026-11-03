@@ -74,7 +74,7 @@ default_font_hinting = false;
 default_font_aa_mode = "8bit";
 
 // User
-user_name = "not-set";
+user_name = "Tarik Harda";
 
 // Keyboard AltGr setting
 lalt_lctrl_is_altgr = false;
@@ -85,3 +85,8 @@ default_flags_bat = "-FC -GR- -EHa- -nologo -Zi";
 default_compiler_sh = "g++";
 default_flags_sh  = "-g";
 
+// Java language server (jdtls). Empty command: jdtls from PATH, then Mason's.
+// user_name above is the @author of generated javadoc; the JDK 8 runtime is offered to
+// legacy projects when the folder exists.
+lsp_java_command = "";
+java_jdk8_path = "~/jdks/jdk8u504-full";

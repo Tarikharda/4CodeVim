@@ -2229,6 +2229,18 @@ vim_execute_ex(Application_Links *app, View_ID view, Buffer_ID buffer, String_Co
     else if (VimEx("set") || VimEx("se")){
         vim_ex_set(app, view, buffer, arg);
     }
+    else if (VimEx("LspRestart")){
+        lsp_restart(app);
+    }
+    else if (VimEx("LspInfo")){
+        Scratch_Block scratch(app);
+        String_Const_u8 label = lsp_status_label(app, scratch, buffer);
+        print_message(app, push_u8_stringf(scratch, "lsp:%.*s roots: %d\n",
+                                           string_expand((label.size > 0)?label:string_u8_litexpr(" not running")), lsp_root_count));
+    }
+    else if (VimEx("LspDiagnostics")){
+        lsp_list_diagnostics(app);
+    }
     else if (VimEx("make") || VimEx("mak")){
         build_in_build_panel(app);
     }
@@ -2288,8 +2300,9 @@ vim_leader(Application_Links *app){
         case 'm': build_in_build_panel(app); break;
         case 'n': goto_next_jump(app); break;
         case 'p': goto_prev_jump(app); break;
-        case 'd': jump_to_definition_at_cursor(app); break;
-        case 'r': list_all_locations_of_identifier(app); break;
+        case 'd': lsp_goto_definition(app); break;
+        case 'q': lsp_list_diagnostics(app); break;
+        case 'r': lsp_find_references(app); break;
         case 's': list_all_locations(app); break;
         case 'l': list_all_functions_current_buffer_lister(app); break;
         case 'o': change_active_panel(app); break;
@@ -2561,8 +2574,8 @@ vim_normal(Application_Links *app, View_ID view, Buffer_ID buffer, u8 c, i32 cou
                         for (; end > get_line_start_pos(app, buffer, line) && vim_is_space(buffer_get_char(app, buffer, end - 1)); end -= 1);
                         vim_set_cursor(app, view, clamp_bot(get_line_start_pos(app, buffer, line), end - 1));
                     }break;
-                    case 'd': jump_to_definition_at_cursor(app); break;
-                    case 'r': list_all_locations_of_identifier(app); break;
+                    case 'd': lsp_goto_definition(app); break;
+                    case 'r': lsp_find_references(app); break;
                     case 'c':
                     {
                         u8 c3 = 0;
@@ -2622,6 +2635,20 @@ vim_normal(Application_Links *app, View_ID view, Buffer_ID buffer, u8 c, i32 cou
                 else if (c2 == 'Q'){
                     vim_quit(app, view, true);
                 }
+            }
+        }break;
+
+        case 'K':
+        {
+            lsp_hover(app);
+        }break;
+
+        // NOTE(vim): ]d and [d move between language server diagnostics.
+        case ']': case '[':
+        {
+            u8 c2 = 0;
+            if (vim_read_char(app, &c2) && c2 == 'd'){
+                lsp_goto_diagnostic(app, (c == ']'));
             }
         }break;
 
@@ -2970,6 +2997,7 @@ CUSTOM_DOC("Leaves insert, replace or visual mode and returns to vim normal mode
 {
     View_ID view = get_active_view(app, Access_ReadVisible);
     Buffer_ID buffer = view_get_buffer(app, view, Access_ReadVisible);
+    lsp_close_popup();
     if (vim_mode == VimMode_Insert || vim_mode == VimMode_Replace){
         vim_leave_insert(app, view, buffer);
     }
@@ -3252,7 +3280,7 @@ vim_mode_label(void){
 }
 
 function void
-vim_draw_mode_label(Application_Links *app, Face_ID face_id, Rect_f32 bar){
+vim_draw_mode_label(Application_Links *app, Face_ID face_id, Buffer_ID buffer, Rect_f32 bar){
     Scratch_Block scratch(app);
     String_Const_u8 label = vim_mode_label();
     if (vim_macro_recording != 0){
@@ -3260,6 +3288,15 @@ vim_draw_mode_label(Application_Links *app, Face_ID face_id, Rect_f32 bar){
     }
     f32 width = get_string_advance(app, face_id, label);
     Rect_f32 box = Rf32(bar.x1 - width, bar.y0, bar.x1, bar.y1);
+
+    // NOTE(vim): Language server status and error/warning counts, left of the mode.
+    String_Const_u8 lsp_label = lsp_status_label(app, scratch, buffer);
+    if (lsp_label.size > 0){
+        f32 lsp_width = get_string_advance(app, face_id, lsp_label);
+        Rect_f32 lsp_box = Rf32(box.x0 - lsp_width, bar.y0, box.x0, bar.y1);
+        draw_rectangle_fcolor(app, lsp_box, 0.f, fcolor_id(defcolor_margin_active));
+        draw_string(app, face_id, lsp_label, V2f32(lsp_box.x0, lsp_box.y0 + 2.f), fcolor_resolve(fcolor_id(defcolor_base)));
+    }
 
     FColor back = fcolor_id(defcolor_keyword);
     switch (vim_mode){
@@ -3436,6 +3473,7 @@ vim_render_buffer(Application_Links *app, View_ID view_id, Face_ID face_id,
 
     // NOTE(vim): Search matches and cursor
     vim_draw_search_highlight(app, buffer, text_layout_id, cursor_roundness);
+    lsp_draw_diagnostics(app, buffer, text_layout_id, face_id);
     vim_draw_cursor(app, view_id, is_active_view, buffer, text_layout_id, cursor_roundness, mark_thickness);
 
     // NOTE(allen): Fade ranges
@@ -3443,6 +3481,9 @@ vim_render_buffer(Application_Links *app, View_ID view_id, Face_ID face_id,
 
     // NOTE(allen): put the actual text on the actual screen
     draw_text_layout_default(app, text_layout_id);
+
+    // NOTE(vim): Hover docs and diagnostic messages float over the text.
+    lsp_draw_popup(app, view_id, text_layout_id, face_id, rect);
 
     draw_set_clip(app, prev_clip);
 }
@@ -3469,7 +3510,7 @@ vim_render_caller(Application_Links *app, Frame_Info frame_info, View_ID view_id
         Rect_f32_Pair pair = layout_file_bar_on_top(region, line_height);
         draw_file_bar(app, view_id, buffer, face_id, pair.min);
         if (is_active_view){
-            vim_draw_mode_label(app, face_id, pair.min);
+            vim_draw_mode_label(app, face_id, buffer, pair.min);
         }
         region = pair.max;
     }
@@ -3592,7 +3633,7 @@ vim_setup_mapping(Mapping *mapping){
     Bind(jump_to_last_point,     KeyCode_O, KeyCode_Control);
     Bind(vim_window_command,     KeyCode_W, KeyCode_Control);
     Bind(vim_visual_block_unsupported, KeyCode_V, KeyCode_Control);
-    Bind(jump_to_definition_at_cursor, KeyCode_RightBracket, KeyCode_Control);
+    Bind(lsp_goto_definition,    KeyCode_RightBracket, KeyCode_Control);
 
     SelectMap(vim_map_visual);
     ParentMap(vim_map_normal);

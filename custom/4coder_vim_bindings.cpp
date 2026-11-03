@@ -7,8 +7,21 @@
 #if !defined(FCODER_VIM_BINDINGS_CPP)
 #define FCODER_VIM_BINDINGS_CPP
 
+// NOTE: System headers for the language server client (process, pipes); included before
+// the 4coder headers define macros such as global and function.
+#if OS_LINUX || OS_MAC
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#endif
+
 #include "4coder_default_include.cpp"
 #include "4coder_fuzzy_search.cpp"
+#include "4coder_lsp.cpp"
 #include "4coder_vim.cpp"
 
 #if !defined(META_PASS)
@@ -37,6 +50,9 @@ custom_layer_init(Application_Links *app){
 
     // NOTE(vim): installs the modal key handling and the mode indicator
     vim_init(app);
+
+    // NOTE(lsp): jdtls for Java buffers
+    lsp_init(app);
 }
 
 #endif //FCODER_VIM_BINDINGS_CPP

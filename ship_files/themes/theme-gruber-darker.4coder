@@ -46,3 +46,8 @@ defcolor_text_cycle = {0xFFBCBEC4, 0xFFBCBEC4, 0xFFBCBEC4, 0xFFBCBEC4};
 
 defcolor_line_numbers_back = 0xFF181818;
 defcolor_line_numbers_text = 0xFF4B5059;
+
+defcolor_lsp_error = 0xFFF75464;
+defcolor_lsp_warning = 0xFFF2C55C;
+defcolor_lsp_info = 0xFF96A6C8;
+defcolor_lsp_popup_back = 0xFF2B2D30;
