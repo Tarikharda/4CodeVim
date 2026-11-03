@@ -1,0 +1,48 @@
+
+// Port of the GruberDarker vim colorscheme (Gruber Darker with IntelliJ Darcula accents).
+
+defcolor_back = 0xFF181818;
+defcolor_margin = 0xFF282828;
+defcolor_margin_hover = 0xFF453D41;
+defcolor_margin_active = 0xFF52494E;
+defcolor_list_item = {defcolor_margin, defcolor_back};
+defcolor_list_item_hover = {0xFF2B2D30, defcolor_margin};
+defcolor_list_item_active = {0xFF2E436E, 0xFF2E436E};
+defcolor_cursor = {0xFFFFDD33, 0xFFF75464};
+defcolor_at_cursor = 0xFF000000;
+defcolor_highlight_cursor_line = 0xFF26282E;
+defcolor_highlight = 0xFF214283;
+defcolor_mark = 0xFF6F737A;
+defcolor_text_default = 0xFFBCBEC4;
+defcolor_at_highlight = 0xFFFFFFFF;
+defcolor_comment = 0xFFCC8C3C;
+defcolor_comment_pop = {0xFF8BB33D, 0xFFF75464};
+defcolor_keyword = 0xFFFFDD33;
+defcolor_str_constant = 0xFF73C936;
+defcolor_char_constant = defcolor_str_constant;
+defcolor_int_constant = 0xFF2AACB8;
+defcolor_float_constant = defcolor_int_constant;
+defcolor_bool_constant = defcolor_keyword;
+defcolor_include = defcolor_str_constant;
+defcolor_preproc = 0xFFB3AE60;
+defcolor_special_character = 0xFFCF8E6D;
+defcolor_ghost_character = 0xFF6F737A;
+
+defcolor_paste = 0xFFFFDD33;
+
+defcolor_undo = 0xFF96A6C8;
+
+defcolor_highlight_junk = 0xFF402929;
+defcolor_highlight_white = 0xFF114957;
+
+defcolor_bar = 0xFF282828;
+defcolor_bar_active = 0xFF453D41;
+defcolor_base = 0xFFFFFFFF;
+defcolor_pop1 = 0xFF96A6C8;
+defcolor_pop2 = 0xFFF75464;
+
+defcolor_back_cycle = {0x08FFFFFF, 0x06FFFFFF, 0x08FFFFFF, 0x06FFFFFF};
+defcolor_text_cycle = {0xFFBCBEC4, 0xFFBCBEC4, 0xFFBCBEC4, 0xFFBCBEC4};
+
+defcolor_line_numbers_back = 0xFF181818;
+defcolor_line_numbers_text = 0xFF4B5059;
