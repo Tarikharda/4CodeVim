@@ -4233,9 +4233,12 @@ vim_render_buffer(Application_Links *app, View_ID view_id, Face_ID face_id,
         }
 
         // NOTE(allen): Search highlight
+        // NOTE(vim): Only while the jump list (*junit failures*, *rg*) is shown in a panel,
+        // so closing the panel clears the marked lines.
         if (use_jump_highlight){
             Buffer_ID jump_buffer = get_locked_jump_buffer(app);
-            if (jump_buffer != compilation_buffer){
+            if (jump_buffer != compilation_buffer &&
+                get_first_view_with_buffer(app, jump_buffer) != 0){
                 draw_jump_highlights(app, buffer, text_layout_id, jump_buffer,
                                      fcolor_id(defcolor_highlight_white));
             }
