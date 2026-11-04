@@ -2,21 +2,29 @@
 // NOTE(allen): Default Mixer Helpers
 
 // TODO(allen): intrinsics wrappers
-#if OS_LINUX
-#include <immintrin.h>
-#define _InterlockedExchangeAdd __sync_fetch_and_add
-#elif OS_MAC
-#include <immintrin.h>
-#define _InterlockedExchangeAdd __sync_fetch_and_add
+// NOTE: _mm_pause and immintrin.h exist only on x86; Apple Silicon (and other arm64) use
+// the yield hint. The gcc/clang atomic works on the u32 itself (long is 8 bytes there).
+#if OS_LINUX || OS_MAC
+# if ARCH_X64 || ARCH_X86
+#  include <immintrin.h>
+#  define AudioSpinPause() _mm_pause()
+# else
+#  define AudioSpinPause() __asm__ __volatile__("yield")
+# endif
 #else
-#include <intrin.h>
+# include <intrin.h>
+# define AudioSpinPause() _mm_pause()
 #endif
 
 function u32
 AtomicAddU32AndReturnOriginal(u32 volatile *Value, u32 Addend)
 {
  // NOTE(casey): Returns the original value _prior_ to adding
+#if OS_LINUX || OS_MAC
+ u32 Result = __sync_fetch_and_add(Value, Addend);
+#else
  u32 Result = _InterlockedExchangeAdd((long volatile*)Value, (long)Addend);
+#endif
  return(Result);
 }
 
@@ -24,7 +32,7 @@ function void
 def_audio_begin_ticket_mutex(Audio_System *Crunky)
 {
  u32 Ticket = AtomicAddU32AndReturnOriginal(&Crunky->ticket, 1);
- while(Ticket != Crunky->serving) {_mm_pause();}
+ while(Ticket != Crunky->serving) {AudioSpinPause();}
 }
 
 function void

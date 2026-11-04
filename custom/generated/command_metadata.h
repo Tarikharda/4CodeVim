@@ -2,7 +2,7 @@
 #define command_id(c) (fcoder_metacmd_ID_##c)
 #define command_metadata(c) (&fcoder_metacmd_table[command_id(c)])
 #define command_metadata_by_id(id) (&fcoder_metacmd_table[id])
-#define command_one_past_last_id 352
+#define command_one_past_last_id 359
 #if defined(CUSTOM_COMMAND_SIG)
 #define PROC_LINKS(x,y) x
 #else
@@ -314,6 +314,13 @@ CUSTOM_COMMAND_SIG(undo);
 CUSTOM_COMMAND_SIG(undo_all_buffers);
 CUSTOM_COMMAND_SIG(view_buffer_other_panel);
 CUSTOM_COMMAND_SIG(view_jump_list_with_lister);
+CUSTOM_COMMAND_SIG(vim_cmd_copy);
+CUSTOM_COMMAND_SIG(vim_cmd_cut);
+CUSTOM_COMMAND_SIG(vim_cmd_paste);
+CUSTOM_COMMAND_SIG(vim_cmd_redo);
+CUSTOM_COMMAND_SIG(vim_cmd_save);
+CUSTOM_COMMAND_SIG(vim_cmd_select_all);
+CUSTOM_COMMAND_SIG(vim_cmd_undo);
 CUSTOM_COMMAND_SIG(vim_decrement_number);
 CUSTOM_COMMAND_SIG(vim_delete_char);
 CUSTOM_COMMAND_SIG(vim_down);
@@ -373,7 +380,7 @@ char *source_name;
 i32 source_name_len;
 i32 line_number;
 };
-static Command_Metadata fcoder_metacmd_table[352] = {
+static Command_Metadata fcoder_metacmd_table[359] = {
 { PROC_LINKS(allow_mouse, 0), false, "allow_mouse", 11, "Shows the mouse and causes all mouse input to be processed normally.", 68, "../code/custom/4coder_default_framework.cpp", 43, 481 },
 { PROC_LINKS(auto_indent_line_at_cursor, 0), false, "auto_indent_line_at_cursor", 26, "Auto-indents the line on which the cursor sits.", 47, "../code/custom/4coder_auto_indent.cpp", 37, 420 },
 { PROC_LINKS(auto_indent_range, 0), false, "auto_indent_range", 17, "Auto-indents the range between the cursor and the mark.", 55, "../code/custom/4coder_auto_indent.cpp", 37, 430 },
@@ -433,10 +440,10 @@ static Command_Metadata fcoder_metacmd_table[352] = {
 { PROC_LINKS(fuzzy_grep_identifier, 0), true, "fuzzy_grep_identifier", 21, "Searches the current project with ripgrep for the word under the cursor and lists the matches with fzf style filtering.", 119, "../code/custom/4coder_fuzzy_search.cpp", 38, 282 },
 { PROC_LINKS(fuzzy_switch_buffer, 0), true, "fuzzy_switch_buffer", 19, "Lists the open buffers with fzf style filtering and shows the chosen one in this panel.", 87, "../code/custom/4coder_fuzzy_search.cpp", 38, 293 },
 { PROC_LINKS(git_blame_line, 0), false, "git_blame_line", 14, "Shows who last changed the cursor line, when and why, in a popup.", 65, "../code/custom/4coder_git.cpp", 29, 728 },
-{ PROC_LINKS(git_lazygit, 0), false, "git_lazygit", 11, "Opens lazygit for the current repository in a new Ghostty window.", 65, "../code/custom/4coder_git.cpp", 29, 805 },
-{ PROC_LINKS(git_lazygit_file, 0), false, "git_lazygit_file", 16, "Opens lazygit with the history of the current file in a new Ghostty window.", 75, "../code/custom/4coder_git.cpp", 29, 826 },
-{ PROC_LINKS(git_lazygit_log, 0), false, "git_lazygit_log", 15, "Opens the lazygit log of the current repository in a new Ghostty window.", 72, "../code/custom/4coder_git.cpp", 29, 812 },
-{ PROC_LINKS(git_lazygit_log_cwd, 0), false, "git_lazygit_log_cwd", 19, "Opens the lazygit log of the working directory in a new Ghostty window.", 71, "../code/custom/4coder_git.cpp", 29, 819 },
+{ PROC_LINKS(git_lazygit, 0), false, "git_lazygit", 11, "Opens lazygit for the current repository in a new Ghostty window.", 65, "../code/custom/4coder_git.cpp", 29, 835 },
+{ PROC_LINKS(git_lazygit_file, 0), false, "git_lazygit_file", 16, "Opens lazygit with the history of the current file in a new Ghostty window.", 75, "../code/custom/4coder_git.cpp", 29, 856 },
+{ PROC_LINKS(git_lazygit_log, 0), false, "git_lazygit_log", 15, "Opens the lazygit log of the current repository in a new Ghostty window.", 72, "../code/custom/4coder_git.cpp", 29, 842 },
+{ PROC_LINKS(git_lazygit_log_cwd, 0), false, "git_lazygit_log_cwd", 19, "Opens the lazygit log of the working directory in a new Ghostty window.", 71, "../code/custom/4coder_git.cpp", 29, 849 },
 { PROC_LINKS(git_list_hunks, 0), true, "git_list_hunks", 14, "Lists the changed blocks of the file with fzf style filtering.", 62, "../code/custom/4coder_git.cpp", 29, 657 },
 { PROC_LINKS(git_next_hunk, 0), false, "git_next_hunk", 13, "Moves to the next changed block of the file compared to the git index.", 70, "../code/custom/4coder_git.cpp", 29, 556 },
 { PROC_LINKS(git_prev_hunk, 0), false, "git_prev_hunk", 13, "Moves to the previous changed block of the file compared to the git index.", 74, "../code/custom/4coder_git.cpp", 29, 562 },
@@ -504,26 +511,26 @@ static Command_Metadata fcoder_metacmd_table[352] = {
 { PROC_LINKS(load_theme_current_buffer, 0), false, "load_theme_current_buffer", 25, "Parse the current buffer as a theme file and add the theme to the theme list. If the buffer has a .4coder postfix in it's name, it is removed when the name is saved.", 165, "../code/custom/4coder_config.cpp", 32, 1611 },
 { PROC_LINKS(load_themes_default_folder, 0), false, "load_themes_default_folder", 26, "Loads all the theme files in the default theme folder.", 54, "../code/custom/4coder_default_framework.cpp", 43, 535 },
 { PROC_LINKS(load_themes_hot_directory, 0), false, "load_themes_hot_directory", 25, "Loads all the theme files in the current hot directory.", 55, "../code/custom/4coder_default_framework.cpp", 43, 554 },
-{ PROC_LINKS(lsp_code_actions, 0), true, "lsp_code_actions", 16, "Lists the language server's quick fixes and refactorings for the cursor line.", 77, "../code/custom/4coder_lsp.cpp", 29, 2843 },
-{ PROC_LINKS(lsp_code_lens, 0), true, "lsp_code_lens", 13, "Runs a code lens of the cursor line (references, implementations), like vim-lsp's LspCodeLens.", 94, "../code/custom/4coder_lsp.cpp", 29, 2790 },
-{ PROC_LINKS(lsp_document_symbols, 0), true, "lsp_document_symbols", 20, "Lists the classes, methods and fields of this file with fzf style filtering.", 76, "../code/custom/4coder_lsp.cpp", 29, 2986 },
-{ PROC_LINKS(lsp_find_references, 0), true, "lsp_find_references", 19, "Lists the references to the symbol under the cursor using the language server, or all locations of the identifier outside Java files.", 133, "../code/custom/4coder_lsp.cpp", 29, 1594 },
-{ PROC_LINKS(lsp_format, 0), false, "lsp_format", 10, "Formats the file with the language server.", 42, "../code/custom/4coder_lsp.cpp", 29, 2894 },
-{ PROC_LINKS(lsp_goto_declaration, 0), true, "lsp_goto_declaration", 20, "Jumps to the declaration of the symbol under the cursor using the language server.", 82, "../code/custom/4coder_lsp.cpp", 29, 2511 },
-{ PROC_LINKS(lsp_goto_definition, 0), true, "lsp_goto_definition", 19, "Jumps to the definition of the symbol under the cursor using the language server, or the code index outside Java files.", 119, "../code/custom/4coder_lsp.cpp", 29, 2505 },
-{ PROC_LINKS(lsp_goto_implementation, 0), true, "lsp_goto_implementation", 23, "Jumps to the implementations of the symbol under the cursor using the language server.", 86, "../code/custom/4coder_lsp.cpp", 29, 2517 },
-{ PROC_LINKS(lsp_goto_type_definition, 0), true, "lsp_goto_type_definition", 24, "Jumps to the type of the symbol under the cursor using the language server.", 75, "../code/custom/4coder_lsp.cpp", 29, 2523 },
-{ PROC_LINKS(lsp_hover, 0), true, "lsp_hover", 9, "Shows the language server's documentation for the symbol under the cursor in a popup.", 85, "../code/custom/4coder_lsp.cpp", 29, 1621 },
-{ PROC_LINKS(lsp_list_diagnostics, 0), true, "lsp_list_diagnostics", 20, "Lists the errors and warnings of all open Java files in an fzf style lister.", 76, "../code/custom/4coder_lsp.cpp", 29, 1641 },
-{ PROC_LINKS(lsp_next_diagnostic, 0), false, "lsp_next_diagnostic", 19, "Moves to the next error or warning reported by the language server and shows its message.", 89, "../code/custom/4coder_lsp.cpp", 29, 2587 },
-{ PROC_LINKS(lsp_organize_imports, 0), false, "lsp_organize_imports", 20, "Adds missing imports and removes unused ones using the language server.", 71, "../code/custom/4coder_lsp.cpp", 29, 2855 },
-{ PROC_LINKS(lsp_prev_diagnostic, 0), false, "lsp_prev_diagnostic", 19, "Moves to the previous error or warning reported by the language server and shows its message.", 93, "../code/custom/4coder_lsp.cpp", 29, 2593 },
-{ PROC_LINKS(lsp_rename, 0), true, "lsp_rename", 10, "Renames the symbol under the cursor everywhere using the language server.", 73, "../code/custom/4coder_lsp.cpp", 29, 2621 },
-{ PROC_LINKS(lsp_restart, 0), false, "lsp_restart", 11, "Stops the Java language server and starts it again for the open Java files.", 75, "../code/custom/4coder_lsp.cpp", 29, 1680 },
-{ PROC_LINKS(lsp_show_line_diagnostics, 0), false, "lsp_show_line_diagnostics", 25, "Shows the language server messages for the cursor line in a popup.", 66, "../code/custom/4coder_lsp.cpp", 29, 2599 },
-{ PROC_LINKS(lsp_signature_help, 0), false, "lsp_signature_help", 18, "Shows the signature of the call around the cursor using the language server.", 76, "../code/custom/4coder_lsp.cpp", 29, 2529 },
-{ PROC_LINKS(lsp_source_actions, 0), true, "lsp_source_actions", 18, "Lists the language server's source actions (generate, organize imports ...) for the file.", 89, "../code/custom/4coder_lsp.cpp", 29, 2849 },
-{ PROC_LINKS(lsp_workspace_symbols, 0), true, "lsp_workspace_symbols", 21, "Searches the symbols of the whole workspace using the language server.", 70, "../code/custom/4coder_lsp.cpp", 29, 2992 },
+{ PROC_LINKS(lsp_code_actions, 0), true, "lsp_code_actions", 16, "Lists the language server's quick fixes and refactorings for the cursor line.", 77, "../code/custom/4coder_lsp.cpp", 29, 2855 },
+{ PROC_LINKS(lsp_code_lens, 0), true, "lsp_code_lens", 13, "Runs a code lens of the cursor line (references, implementations), like vim-lsp's LspCodeLens.", 94, "../code/custom/4coder_lsp.cpp", 29, 2802 },
+{ PROC_LINKS(lsp_document_symbols, 0), true, "lsp_document_symbols", 20, "Lists the classes, methods and fields of this file with fzf style filtering.", 76, "../code/custom/4coder_lsp.cpp", 29, 2998 },
+{ PROC_LINKS(lsp_find_references, 0), true, "lsp_find_references", 19, "Lists the references to the symbol under the cursor using the language server, or all locations of the identifier outside Java files.", 133, "../code/custom/4coder_lsp.cpp", 29, 1606 },
+{ PROC_LINKS(lsp_format, 0), false, "lsp_format", 10, "Formats the file with the language server.", 42, "../code/custom/4coder_lsp.cpp", 29, 2906 },
+{ PROC_LINKS(lsp_goto_declaration, 0), true, "lsp_goto_declaration", 20, "Jumps to the declaration of the symbol under the cursor using the language server.", 82, "../code/custom/4coder_lsp.cpp", 29, 2523 },
+{ PROC_LINKS(lsp_goto_definition, 0), true, "lsp_goto_definition", 19, "Jumps to the definition of the symbol under the cursor using the language server, or the code index outside Java files.", 119, "../code/custom/4coder_lsp.cpp", 29, 2517 },
+{ PROC_LINKS(lsp_goto_implementation, 0), true, "lsp_goto_implementation", 23, "Jumps to the implementations of the symbol under the cursor using the language server.", 86, "../code/custom/4coder_lsp.cpp", 29, 2529 },
+{ PROC_LINKS(lsp_goto_type_definition, 0), true, "lsp_goto_type_definition", 24, "Jumps to the type of the symbol under the cursor using the language server.", 75, "../code/custom/4coder_lsp.cpp", 29, 2535 },
+{ PROC_LINKS(lsp_hover, 0), true, "lsp_hover", 9, "Shows the language server's documentation for the symbol under the cursor in a popup.", 85, "../code/custom/4coder_lsp.cpp", 29, 1633 },
+{ PROC_LINKS(lsp_list_diagnostics, 0), true, "lsp_list_diagnostics", 20, "Lists the errors and warnings of all open Java files in an fzf style lister.", 76, "../code/custom/4coder_lsp.cpp", 29, 1653 },
+{ PROC_LINKS(lsp_next_diagnostic, 0), false, "lsp_next_diagnostic", 19, "Moves to the next error or warning reported by the language server and shows its message.", 89, "../code/custom/4coder_lsp.cpp", 29, 2599 },
+{ PROC_LINKS(lsp_organize_imports, 0), false, "lsp_organize_imports", 20, "Adds missing imports and removes unused ones using the language server.", 71, "../code/custom/4coder_lsp.cpp", 29, 2867 },
+{ PROC_LINKS(lsp_prev_diagnostic, 0), false, "lsp_prev_diagnostic", 19, "Moves to the previous error or warning reported by the language server and shows its message.", 93, "../code/custom/4coder_lsp.cpp", 29, 2605 },
+{ PROC_LINKS(lsp_rename, 0), true, "lsp_rename", 10, "Renames the symbol under the cursor everywhere using the language server.", 73, "../code/custom/4coder_lsp.cpp", 29, 2633 },
+{ PROC_LINKS(lsp_restart, 0), false, "lsp_restart", 11, "Stops the Java language server and starts it again for the open Java files.", 75, "../code/custom/4coder_lsp.cpp", 29, 1692 },
+{ PROC_LINKS(lsp_show_line_diagnostics, 0), false, "lsp_show_line_diagnostics", 25, "Shows the language server messages for the cursor line in a popup.", 66, "../code/custom/4coder_lsp.cpp", 29, 2611 },
+{ PROC_LINKS(lsp_signature_help, 0), false, "lsp_signature_help", 18, "Shows the signature of the call around the cursor using the language server.", 76, "../code/custom/4coder_lsp.cpp", 29, 2541 },
+{ PROC_LINKS(lsp_source_actions, 0), true, "lsp_source_actions", 18, "Lists the language server's source actions (generate, organize imports ...) for the file.", 89, "../code/custom/4coder_lsp.cpp", 29, 2861 },
+{ PROC_LINKS(lsp_workspace_symbols, 0), true, "lsp_workspace_symbols", 21, "Searches the symbols of the whole workspace using the language server.", 70, "../code/custom/4coder_lsp.cpp", 29, 3004 },
 { PROC_LINKS(make_directory_query, 0), false, "make_directory_query", 20, "Queries the user for a name and creates a new directory with the given name.", 76, "../code/custom/4coder_base_commands.cpp", 39, 1497 },
 { PROC_LINKS(miblo_decrement_basic, 0), false, "miblo_decrement_basic", 21, "Decrement an integer under the cursor by one.", 45, "../code/custom/4coder_miblo_numbers.cpp", 39, 44 },
 { PROC_LINKS(miblo_decrement_time_stamp, 0), false, "miblo_decrement_time_stamp", 26, "Decrement a time stamp under the cursor by one second. (format [m]m:ss or h:mm:ss", 81, "../code/custom/4coder_miblo_numbers.cpp", 39, 237 },
@@ -573,8 +580,8 @@ static Command_Metadata fcoder_metacmd_table[352] = {
 { PROC_LINKS(open_matching_file_cpp, 0), false, "open_matching_file_cpp", 22, "If the current file is a *.cpp or *.h, attempts to open the corresponding *.h or *.cpp file in the other view.", 110, "../code/custom/4coder_base_commands.cpp", 39, 1661 },
 { PROC_LINKS(open_panel_hsplit, 0), false, "open_panel_hsplit", 17, "Create a new panel by horizontally splitting the active panel.", 62, "../code/custom/4coder_default_framework.cpp", 43, 382 },
 { PROC_LINKS(open_panel_vsplit, 0), false, "open_panel_vsplit", 17, "Create a new panel by vertically splitting the active panel.", 60, "../code/custom/4coder_default_framework.cpp", 43, 372 },
-{ PROC_LINKS(open_terminal_cwd, 0), false, "open_terminal_cwd", 17, "Opens a Ghostty terminal in 4coder's working directory.", 55, "../code/custom/4coder_git.cpp", 29, 843 },
-{ PROC_LINKS(open_terminal_root, 0), false, "open_terminal_root", 18, "Opens a Ghostty terminal in the current repository (or the working directory).", 78, "../code/custom/4coder_git.cpp", 29, 836 },
+{ PROC_LINKS(open_terminal_cwd, 0), false, "open_terminal_cwd", 17, "Opens a Ghostty terminal in 4coder's working directory.", 55, "../code/custom/4coder_git.cpp", 29, 873 },
+{ PROC_LINKS(open_terminal_root, 0), false, "open_terminal_root", 18, "Opens a Ghostty terminal in the current repository (or the working directory).", 78, "../code/custom/4coder_git.cpp", 29, 866 },
 { PROC_LINKS(page_down, 0), false, "page_down", 9, "Scrolls the view down one view height and moves the cursor down one view height.", 80, "../code/custom/4coder_base_commands.cpp", 39, 378 },
 { PROC_LINKS(page_up, 0), false, "page_up", 7, "Scrolls the view up one view height and moves the cursor up one view height.", 76, "../code/custom/4coder_base_commands.cpp", 39, 370 },
 { PROC_LINKS(paste, 0), false, "paste", 5, "At the cursor, insert the text at the top of the clipboard.", 59, "../code/custom/4coder_clipboard.cpp", 35, 130 },
@@ -679,6 +686,13 @@ static Command_Metadata fcoder_metacmd_table[352] = {
 { PROC_LINKS(undo_all_buffers, 0), false, "undo_all_buffers", 16, "Advances backward through the undo history in the buffer containing the most recent regular edit.", 97, "../code/custom/4coder_base_commands.cpp", 39, 1914 },
 { PROC_LINKS(view_buffer_other_panel, 0), false, "view_buffer_other_panel", 23, "Set the other non-active panel to view the buffer that the active panel views, and switch to that panel.", 104, "../code/custom/4coder_base_commands.cpp", 39, 1674 },
 { PROC_LINKS(view_jump_list_with_lister, 0), false, "view_jump_list_with_lister", 26, "When executed on a buffer with jumps, creates a persistent lister for all the jumps", 83, "../code/custom/4coder_jump_lister.cpp", 37, 59 },
+{ PROC_LINKS(vim_cmd_copy, 0), false, "vim_cmd_copy", 12, "Cmd-C: copies the visual selection to the system clipboard.", 59, "../code/custom/4coder_vim.cpp", 29, 3637 },
+{ PROC_LINKS(vim_cmd_cut, 0), false, "vim_cmd_cut", 11, "Cmd-X: cuts the visual selection to the system clipboard.", 57, "../code/custom/4coder_vim.cpp", 29, 3645 },
+{ PROC_LINKS(vim_cmd_paste, 0), false, "vim_cmd_paste", 13, "Cmd-V: pastes the system clipboard (before the cursor, over a selection, or as typed text in insert mode).", 106, "../code/custom/4coder_vim.cpp", 29, 3653 },
+{ PROC_LINKS(vim_cmd_redo, 0), false, "vim_cmd_redo", 12, "Shift-Cmd-Z: redo.", 18, "../code/custom/4coder_vim.cpp", 29, 3689 },
+{ PROC_LINKS(vim_cmd_save, 0), false, "vim_cmd_save", 12, "Cmd-S: saves the buffer, staying in the current mode.", 53, "../code/custom/4coder_vim.cpp", 29, 3710 },
+{ PROC_LINKS(vim_cmd_select_all, 0), false, "vim_cmd_select_all", 18, "Cmd-A: selects the whole buffer in visual line mode.", 52, "../code/custom/4coder_vim.cpp", 29, 3700 },
+{ PROC_LINKS(vim_cmd_undo, 0), false, "vim_cmd_undo", 12, "Cmd-Z: undo (leaves insert or visual mode first).", 49, "../code/custom/4coder_vim.cpp", 29, 3679 },
 { PROC_LINKS(vim_decrement_number, 0), false, "vim_decrement_number", 20, "Vim <c-x>, subtracts one from the number at or after the cursor.", 64, "../code/custom/4coder_vim.cpp", 29, 3451 },
 { PROC_LINKS(vim_delete_char, 0), false, "vim_delete_char", 15, "Vim x in normal mode.", 21, "../code/custom/4coder_vim.cpp", 29, 3433 },
 { PROC_LINKS(vim_down, 0), false, "vim_down", 8, "Vim j motion.", 13, "../code/custom/4coder_vim.cpp", 29, 3404 },
@@ -686,22 +700,22 @@ static Command_Metadata fcoder_metacmd_table[352] = {
 { PROC_LINKS(vim_half_page_up, 0), false, "vim_half_page_up", 16, "Vim <c-u>, moves the cursor up half a screen.", 45, "../code/custom/4coder_vim.cpp", 29, 3490 },
 { PROC_LINKS(vim_handle_text, 0), false, "vim_handle_text", 15, "Interprets typed text as a vim normal or visual mode command.", 61, "../code/custom/4coder_vim.cpp", 29, 3267 },
 { PROC_LINKS(vim_increment_number, 0), false, "vim_increment_number", 20, "Vim <c-a>, adds one to the number at or after the cursor.", 57, "../code/custom/4coder_vim.cpp", 29, 3445 },
-{ PROC_LINKS(vim_insert_accept, 0), false, "vim_insert_accept", 17, "Insert <c-y>: accepts the selected completion.", 46, "../code/custom/4coder_vim.cpp", 29, 3679 },
-{ PROC_LINKS(vim_insert_backspace, 0), false, "vim_insert_backspace", 20, "Vim insert mode backspace; on a snippet placeholder it clears the placeholder.", 78, "../code/custom/4coder_vim.cpp", 29, 3623 },
-{ PROC_LINKS(vim_insert_close_menu, 0), false, "vim_insert_close_menu", 21, "Insert <c-e>: closes the completion menu.", 41, "../code/custom/4coder_vim.cpp", 29, 3685 },
+{ PROC_LINKS(vim_insert_accept, 0), false, "vim_insert_accept", 17, "Insert <c-y>: accepts the selected completion.", 46, "../code/custom/4coder_vim.cpp", 29, 3790 },
+{ PROC_LINKS(vim_insert_backspace, 0), false, "vim_insert_backspace", 20, "Vim insert mode backspace; on a snippet placeholder it clears the placeholder.", 78, "../code/custom/4coder_vim.cpp", 29, 3734 },
+{ PROC_LINKS(vim_insert_close_menu, 0), false, "vim_insert_close_menu", 21, "Insert <c-e>: closes the completion menu.", 41, "../code/custom/4coder_vim.cpp", 29, 3796 },
 { PROC_LINKS(vim_insert_dedent, 0), false, "vim_insert_dedent", 17, "Vim insert mode <c-d>, removes one level of indentation from the current line.", 78, "../code/custom/4coder_vim.cpp", 29, 3581 },
 { PROC_LINKS(vim_insert_delete_line, 0), false, "vim_insert_delete_line", 22, "Vim insert mode <c-u>, deletes back to the indentation or the start of the line.", 80, "../code/custom/4coder_vim.cpp", 29, 3544 },
 { PROC_LINKS(vim_insert_delete_word, 0), false, "vim_insert_delete_word", 22, "Vim insert mode <c-w>, deletes the word before the cursor.", 58, "../code/custom/4coder_vim.cpp", 29, 3520 },
-{ PROC_LINKS(vim_insert_down, 0), false, "vim_insert_down", 15, "Selects the next completion, or moves down a line.", 50, "../code/custom/4coder_vim.cpp", 29, 3635 },
+{ PROC_LINKS(vim_insert_down, 0), false, "vim_insert_down", 15, "Selects the next completion, or moves down a line.", 50, "../code/custom/4coder_vim.cpp", 29, 3746 },
 { PROC_LINKS(vim_insert_indent, 0), false, "vim_insert_indent", 17, "Vim insert mode <c-t>, indents the current line.", 48, "../code/custom/4coder_vim.cpp", 29, 3575 },
-{ PROC_LINKS(vim_insert_next, 0), false, "vim_insert_next", 15, "Vim insert <c-n>: next completion, opening the menu if needed.", 62, "../code/custom/4coder_vim.cpp", 29, 3667 },
-{ PROC_LINKS(vim_insert_prev, 0), false, "vim_insert_prev", 15, "Vim insert <c-p>: previous completion, opening the menu if needed.", 66, "../code/custom/4coder_vim.cpp", 29, 3673 },
+{ PROC_LINKS(vim_insert_next, 0), false, "vim_insert_next", 15, "Vim insert <c-n>: next completion, opening the menu if needed.", 62, "../code/custom/4coder_vim.cpp", 29, 3778 },
+{ PROC_LINKS(vim_insert_prev, 0), false, "vim_insert_prev", 15, "Vim insert <c-p>: previous completion, opening the menu if needed.", 66, "../code/custom/4coder_vim.cpp", 29, 3784 },
 { PROC_LINKS(vim_insert_register, 0), false, "vim_insert_register", 19, "Vim insert mode <c-r>{register}, inserts the contents of a register.", 68, "../code/custom/4coder_vim.cpp", 29, 3587 },
-{ PROC_LINKS(vim_insert_return, 0), false, "vim_insert_return", 17, "Insert <cr>: accepts the selected completion, otherwise breaks the line.", 72, "../code/custom/4coder_vim.cpp", 29, 3693 },
-{ PROC_LINKS(vim_insert_shift_tab, 0), false, "vim_insert_shift_tab", 20, "Insert <s-tab>: selects the previous completion.", 48, "../code/custom/4coder_vim.cpp", 29, 3702 },
-{ PROC_LINKS(vim_insert_tab, 0), false, "vim_insert_tab", 14, "Insert <tab>: selects the next completion, or jumps to the next snippet placeholder, otherwise types a tab.", 107, "../code/custom/4coder_vim.cpp", 29, 3713 },
-{ PROC_LINKS(vim_insert_text, 0), false, "vim_insert_text", 15, "Inserts typed text in vim insert mode and updates completion and signature help.", 80, "../code/custom/4coder_vim.cpp", 29, 3610 },
-{ PROC_LINKS(vim_insert_up, 0), false, "vim_insert_up", 13, "Selects the previous completion, or moves up a line.", 52, "../code/custom/4coder_vim.cpp", 29, 3646 },
+{ PROC_LINKS(vim_insert_return, 0), false, "vim_insert_return", 17, "Insert <cr>: accepts the selected completion, otherwise breaks the line.", 72, "../code/custom/4coder_vim.cpp", 29, 3804 },
+{ PROC_LINKS(vim_insert_shift_tab, 0), false, "vim_insert_shift_tab", 20, "Insert <s-tab>: selects the previous completion.", 48, "../code/custom/4coder_vim.cpp", 29, 3813 },
+{ PROC_LINKS(vim_insert_tab, 0), false, "vim_insert_tab", 14, "Insert <tab>: selects the next completion, or jumps to the next snippet placeholder, otherwise types a tab.", 107, "../code/custom/4coder_vim.cpp", 29, 3824 },
+{ PROC_LINKS(vim_insert_text, 0), false, "vim_insert_text", 15, "Inserts typed text in vim insert mode and updates completion and signature help.", 80, "../code/custom/4coder_vim.cpp", 29, 3721 },
+{ PROC_LINKS(vim_insert_up, 0), false, "vim_insert_up", 13, "Selects the previous completion, or moves up a line.", 52, "../code/custom/4coder_vim.cpp", 29, 3757 },
 { PROC_LINKS(vim_left, 0), false, "vim_left", 8, "Vim h motion.", 13, "../code/custom/4coder_vim.cpp", 29, 3386 },
 { PROC_LINKS(vim_line_end_motion, 0), false, "vim_line_end_motion", 19, "Vim $ motion.", 13, "../code/custom/4coder_vim.cpp", 29, 3416 },
 { PROC_LINKS(vim_line_start, 0), false, "vim_line_start", 14, "Vim 0 motion.", 13, "../code/custom/4coder_vim.cpp", 29, 3410 },
@@ -1032,51 +1046,58 @@ static i32 fcoder_metacmd_ID_undo = 301;
 static i32 fcoder_metacmd_ID_undo_all_buffers = 302;
 static i32 fcoder_metacmd_ID_view_buffer_other_panel = 303;
 static i32 fcoder_metacmd_ID_view_jump_list_with_lister = 304;
-static i32 fcoder_metacmd_ID_vim_decrement_number = 305;
-static i32 fcoder_metacmd_ID_vim_delete_char = 306;
-static i32 fcoder_metacmd_ID_vim_down = 307;
-static i32 fcoder_metacmd_ID_vim_half_page_down = 308;
-static i32 fcoder_metacmd_ID_vim_half_page_up = 309;
-static i32 fcoder_metacmd_ID_vim_handle_text = 310;
-static i32 fcoder_metacmd_ID_vim_increment_number = 311;
-static i32 fcoder_metacmd_ID_vim_insert_accept = 312;
-static i32 fcoder_metacmd_ID_vim_insert_backspace = 313;
-static i32 fcoder_metacmd_ID_vim_insert_close_menu = 314;
-static i32 fcoder_metacmd_ID_vim_insert_dedent = 315;
-static i32 fcoder_metacmd_ID_vim_insert_delete_line = 316;
-static i32 fcoder_metacmd_ID_vim_insert_delete_word = 317;
-static i32 fcoder_metacmd_ID_vim_insert_down = 318;
-static i32 fcoder_metacmd_ID_vim_insert_indent = 319;
-static i32 fcoder_metacmd_ID_vim_insert_next = 320;
-static i32 fcoder_metacmd_ID_vim_insert_prev = 321;
-static i32 fcoder_metacmd_ID_vim_insert_register = 322;
-static i32 fcoder_metacmd_ID_vim_insert_return = 323;
-static i32 fcoder_metacmd_ID_vim_insert_shift_tab = 324;
-static i32 fcoder_metacmd_ID_vim_insert_tab = 325;
-static i32 fcoder_metacmd_ID_vim_insert_text = 326;
-static i32 fcoder_metacmd_ID_vim_insert_up = 327;
-static i32 fcoder_metacmd_ID_vim_left = 328;
-static i32 fcoder_metacmd_ID_vim_line_end_motion = 329;
-static i32 fcoder_metacmd_ID_vim_line_start = 330;
-static i32 fcoder_metacmd_ID_vim_normal_mode = 331;
-static i32 fcoder_metacmd_ID_vim_redo = 332;
-static i32 fcoder_metacmd_ID_vim_replace_text = 333;
-static i32 fcoder_metacmd_ID_vim_return = 334;
-static i32 fcoder_metacmd_ID_vim_right = 335;
-static i32 fcoder_metacmd_ID_vim_scroll_down_line = 336;
-static i32 fcoder_metacmd_ID_vim_scroll_up_line = 337;
-static i32 fcoder_metacmd_ID_vim_up = 338;
-static i32 fcoder_metacmd_ID_vim_visual_block_unsupported = 339;
-static i32 fcoder_metacmd_ID_vim_window_command = 340;
-static i32 fcoder_metacmd_ID_word_complete = 341;
-static i32 fcoder_metacmd_ID_word_complete_drop_down = 342;
-static i32 fcoder_metacmd_ID_write_block = 343;
-static i32 fcoder_metacmd_ID_write_hack = 344;
-static i32 fcoder_metacmd_ID_write_note = 345;
-static i32 fcoder_metacmd_ID_write_space = 346;
-static i32 fcoder_metacmd_ID_write_text_and_auto_indent = 347;
-static i32 fcoder_metacmd_ID_write_text_input = 348;
-static i32 fcoder_metacmd_ID_write_todo = 349;
-static i32 fcoder_metacmd_ID_write_underscore = 350;
-static i32 fcoder_metacmd_ID_write_zero_struct = 351;
+static i32 fcoder_metacmd_ID_vim_cmd_copy = 305;
+static i32 fcoder_metacmd_ID_vim_cmd_cut = 306;
+static i32 fcoder_metacmd_ID_vim_cmd_paste = 307;
+static i32 fcoder_metacmd_ID_vim_cmd_redo = 308;
+static i32 fcoder_metacmd_ID_vim_cmd_save = 309;
+static i32 fcoder_metacmd_ID_vim_cmd_select_all = 310;
+static i32 fcoder_metacmd_ID_vim_cmd_undo = 311;
+static i32 fcoder_metacmd_ID_vim_decrement_number = 312;
+static i32 fcoder_metacmd_ID_vim_delete_char = 313;
+static i32 fcoder_metacmd_ID_vim_down = 314;
+static i32 fcoder_metacmd_ID_vim_half_page_down = 315;
+static i32 fcoder_metacmd_ID_vim_half_page_up = 316;
+static i32 fcoder_metacmd_ID_vim_handle_text = 317;
+static i32 fcoder_metacmd_ID_vim_increment_number = 318;
+static i32 fcoder_metacmd_ID_vim_insert_accept = 319;
+static i32 fcoder_metacmd_ID_vim_insert_backspace = 320;
+static i32 fcoder_metacmd_ID_vim_insert_close_menu = 321;
+static i32 fcoder_metacmd_ID_vim_insert_dedent = 322;
+static i32 fcoder_metacmd_ID_vim_insert_delete_line = 323;
+static i32 fcoder_metacmd_ID_vim_insert_delete_word = 324;
+static i32 fcoder_metacmd_ID_vim_insert_down = 325;
+static i32 fcoder_metacmd_ID_vim_insert_indent = 326;
+static i32 fcoder_metacmd_ID_vim_insert_next = 327;
+static i32 fcoder_metacmd_ID_vim_insert_prev = 328;
+static i32 fcoder_metacmd_ID_vim_insert_register = 329;
+static i32 fcoder_metacmd_ID_vim_insert_return = 330;
+static i32 fcoder_metacmd_ID_vim_insert_shift_tab = 331;
+static i32 fcoder_metacmd_ID_vim_insert_tab = 332;
+static i32 fcoder_metacmd_ID_vim_insert_text = 333;
+static i32 fcoder_metacmd_ID_vim_insert_up = 334;
+static i32 fcoder_metacmd_ID_vim_left = 335;
+static i32 fcoder_metacmd_ID_vim_line_end_motion = 336;
+static i32 fcoder_metacmd_ID_vim_line_start = 337;
+static i32 fcoder_metacmd_ID_vim_normal_mode = 338;
+static i32 fcoder_metacmd_ID_vim_redo = 339;
+static i32 fcoder_metacmd_ID_vim_replace_text = 340;
+static i32 fcoder_metacmd_ID_vim_return = 341;
+static i32 fcoder_metacmd_ID_vim_right = 342;
+static i32 fcoder_metacmd_ID_vim_scroll_down_line = 343;
+static i32 fcoder_metacmd_ID_vim_scroll_up_line = 344;
+static i32 fcoder_metacmd_ID_vim_up = 345;
+static i32 fcoder_metacmd_ID_vim_visual_block_unsupported = 346;
+static i32 fcoder_metacmd_ID_vim_window_command = 347;
+static i32 fcoder_metacmd_ID_word_complete = 348;
+static i32 fcoder_metacmd_ID_word_complete_drop_down = 349;
+static i32 fcoder_metacmd_ID_write_block = 350;
+static i32 fcoder_metacmd_ID_write_hack = 351;
+static i32 fcoder_metacmd_ID_write_note = 352;
+static i32 fcoder_metacmd_ID_write_space = 353;
+static i32 fcoder_metacmd_ID_write_text_and_auto_indent = 354;
+static i32 fcoder_metacmd_ID_write_text_input = 355;
+static i32 fcoder_metacmd_ID_write_todo = 356;
+static i32 fcoder_metacmd_ID_write_underscore = 357;
+static i32 fcoder_metacmd_ID_write_zero_struct = 358;
 #endif

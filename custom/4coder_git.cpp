@@ -787,16 +787,46 @@ CUSTOM_DOC("Shows who last changed the cursor line, when and why, in a popup.")
     lsp_show_popup(app, view, message);
 }
 
+// NOTE(git): The program with its first word made absolute from PATH, for terminals that
+// start commands with a different PATH (Ghostty on macOS runs them through login).
+function String_Const_u8
+git_resolve_program(Arena *arena, String_Const_u8 program){
+    String_Const_u8 result = program;
+    u64 space = string_find_first(program, ' ');
+    String_Const_u8 name = string_prefix(program, space);
+    char *path_env = getenv("PATH");
+    if (name.size > 0 && string_find_first(name, '/') >= name.size && path_env != 0){
+        List_String_Const_u8 dirs = string_split(arena, SCu8(path_env), (u8*)":", 1);
+        for (Node_String_Const_u8 *node = dirs.first; node != 0; node = node->next){
+            String_Const_u8 candidate = push_u8_stringf(arena, "%.*s/%.*s", string_expand(node->string), string_expand(name));
+            if (lsp_is_executable(arena, candidate)){
+                result = push_u8_stringf(arena, "%.*s%.*s", string_expand(fuzzy_shell_quote(arena, candidate)),
+                                         string_expand(string_skip(program, name.size)));
+                break;
+            }
+        }
+    }
+    return(result);
+}
+
 // NOTE(git): Runs a terminal program in a new Ghostty window in dir (empty program: a shell).
-// Single instance mode is turned off so the window gets this directory and program even when
-// another Ghostty is already running.
+// Linux: single instance mode is turned off so the window gets this directory and program
+// even when another Ghostty is already running. macOS has no setsid and Ghostty is an app
+// bundle: "open -na" starts a new instance with the arguments.
 function void
 git_spawn_terminal(Application_Links *app, String_Const_u8 dir, String_Const_u8 program){
     Scratch_Block scratch(app);
     String_Const_u8 dir_q = fuzzy_shell_quote(scratch, dir);
+#if OS_MAC
+    program = git_resolve_program(scratch, program);
+    String_Const_u8 command = push_u8_stringf(scratch, "(cd %.*s && open -na Ghostty.app --args --working-directory=%.*s%s%.*s > /dev/null 2>&1 &)",
+                                              string_expand(dir_q), string_expand(dir_q),
+                                              (program.size > 0)?" -e ":"", string_expand(program));
+#else
     String_Const_u8 command = push_u8_stringf(scratch, "(cd %.*s && setsid ghostty --gtk-single-instance=false --working-directory=%.*s%s%.*s > /dev/null 2>&1 &)",
                                               string_expand(dir_q), string_expand(dir_q),
                                               (program.size > 0)?" -e ":"", string_expand(program));
+#endif
     if (system((char*)command.str) != 0){
         print_message(app, string_u8_litexpr("git: could not start ghostty\n"));
     }

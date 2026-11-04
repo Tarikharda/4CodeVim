@@ -1252,8 +1252,49 @@ main(int arg_count, char **args){
 
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
+        // NOTE: Holding a key repeats it (hjkl in vim normal mode) instead of opening the
+        // accent picker; like MacVim, unless the user set it globally.
+        [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"ApplePressAndHoldEnabled": @NO}];
+
         FCoder_App_Delegate *app_delegate = [[FCoder_App_Delegate alloc] init];
         [NSApp setDelegate:app_delegate];
+
+        // NOTE: Menu bar with the standard app and window items. Quit uses performClose:
+        // like the window's close button, so unsaved buffers still ask before exiting.
+        {
+            NSString *app_name = [NSString stringWithUTF8String:APP_NAME];
+            NSMenu *menu_bar = [[NSMenu alloc] init];
+
+            NSMenuItem *app_item = [[NSMenuItem alloc] init];
+            [menu_bar addItem:app_item];
+            NSMenu *app_menu = [[NSMenu alloc] init];
+            [app_menu addItemWithTitle:[@"Hide " stringByAppendingString:app_name]
+                      action:@selector(hide:) keyEquivalent:@"h"];
+            NSMenuItem *hide_others = [app_menu addItemWithTitle:@"Hide Others"
+                                       action:@selector(hideOtherApplications:) keyEquivalent:@"h"];
+            [hide_others setKeyEquivalentModifierMask:NSEventModifierFlagOption|NSEventModifierFlagCommand];
+            [app_menu addItemWithTitle:@"Show All"
+                      action:@selector(unhideAllApplications:) keyEquivalent:@""];
+            [app_menu addItem:[NSMenuItem separatorItem]];
+            [app_menu addItemWithTitle:[@"Quit " stringByAppendingString:app_name]
+                      action:@selector(performClose:) keyEquivalent:@"q"];
+            [app_item setSubmenu:app_menu];
+
+            NSMenuItem *window_item = [[NSMenuItem alloc] init];
+            [menu_bar addItem:window_item];
+            NSMenu *window_menu = [[NSMenu alloc] initWithTitle:@"Window"];
+            [window_menu addItemWithTitle:@"Minimize"
+                         action:@selector(performMiniaturize:) keyEquivalent:@"m"];
+            [window_menu addItemWithTitle:@"Zoom"
+                         action:@selector(performZoom:) keyEquivalent:@""];
+            NSMenuItem *full_screen = [window_menu addItemWithTitle:@"Toggle Full Screen"
+                                       action:@selector(toggleFullScreen:) keyEquivalent:@"f"];
+            [full_screen setKeyEquivalentModifierMask:NSEventModifierFlagControl|NSEventModifierFlagCommand];
+            [window_item setSubmenu:window_menu];
+
+            [NSApp setMainMenu:menu_bar];
+            [NSApp setWindowsMenu:window_menu];
+        }
 
         mac_init_recursive_mutex(&memory_tracker_mutex);
 
@@ -1430,7 +1471,7 @@ main(int arg_count, char **args){
 
         [mac_vars.window setMinSize:NSMakeSize(100, 100)];
         [mac_vars.window setBackgroundColor:NSColor.blackColor];
-        [mac_vars.window setTitle:@"GRAPHICS"];
+        [mac_vars.window setTitle:[NSString stringWithUTF8String:WINDOW_NAME]];
         [mac_vars.window setAcceptsMouseMovedEvents:YES];
 
         NSView* content_view = [mac_vars.window contentView];

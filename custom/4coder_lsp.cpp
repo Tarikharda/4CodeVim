@@ -568,6 +568,12 @@ lsp_spawn(char **argv, char *dir){
     }
     close(in_pair[1]);
     close(out_pipe[1]);
+#if OS_MAC
+    // NOTE(lsp): macOS has no MSG_NOSIGNAL: without this a write after jdtls died would
+    // raise SIGPIPE and kill the editor.
+    i32 no_sigpipe = 1;
+    setsockopt(in_pair[0], SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
+#endif
     if (pid < 0){
         close(in_pair[0]);
         close(out_pipe[0]);
@@ -871,6 +877,12 @@ lsp_java_settings(Application_Links *app, Arena *arena){
                           string_expand(json_escape(arena, user_name)));
     }
     String_Const_u8 jdk8 = lsp_expand_home(arena, def_get_config_string(arena, vars_save_string_lit("java_jdk8_path")));
+    // NOTE(lsp): A macOS JDK is a bundle with the Java home in Contents/Home, so the same
+    // java_jdk8_path works on both systems.
+    String_Const_u8 bundle_home = push_u8_stringf(arena, "%.*s/Contents/Home", string_expand(jdk8));
+    if (jdk8.size > 0 && file_exists(app, bundle_home)){
+        jdk8 = bundle_home;
+    }
     if (jdk8.size > 0 && file_exists(app, jdk8)){
         string_list_pushf(arena, &parts, "\"configuration\":{\"runtimes\":[{\"name\":\"JavaSE-1.8\",\"path\":\"%.*s\",\"default\":true}]}",
                           string_expand(json_escape(arena, jdk8)));

@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-This is a personal fork of the 4coder editor (frozen upstream in 2022, MIT licensed) being turned into a full time editor with a vim style modal layer. The checkout lives at `4ed/code`; builds go to the sibling `4ed/build`. Upstream also expects a sibling `4coder-non-source` repo (fonts, icons, Windows freetype libs) — it is **not present** here, so anything that reads from `../4coder-non-source` is missing and has local fallbacks (system freetype via `pkg-config`, system Liberation Mono font).
+This is a personal fork of the 4coder editor (frozen upstream in 2022, MIT licensed) being turned into a full time editor with a vim style modal layer, shown as **My Editor** (`APP_NAME` in `custom/4coder_version.h`). The user works on **Linux and macOS** full time; everything must keep building and behaving the same on both. The checkout lives at `4ed/code`; builds go to the sibling `4ed/build`. Upstream also expects a sibling `4coder-non-source` repo (fonts, icons, Windows freetype libs) — it is **not present** here, so anything that reads from `../4coder-non-source` is missing and has local fallbacks (system freetype via `pkg-config`, system Liberation Mono font).
 
 ## Commands
 
@@ -11,18 +11,24 @@ bin/build-linux.sh                 # dev build (-g, FRED_INTERNAL) of everything
 bin/build-linux.sh -DOPT_BUILD     # optimized build
 bin/install-linux.sh               # optimized build + install to ~/.local/share/4coder, symlink ~/.local/bin/4coder
 bin/test-vim-linux.sh [filter]     # drives a real 4coder window with xdotool and checks vim behavior
+
+bin/build-mac.sh [-DOPT_BUILD]     # macOS build (clang, Homebrew freetype via pkg-config, native arm64 or x64)
+bin/install-mac.sh                 # optimized build + ~/Applications/My Editor.app, symlink ~/.local/bin/4coder
 ```
+
+- macOS cannot be built or run from the Linux machine. Keep macOS-only code small and behind `#if OS_MAC`, and check the custom layer's macOS branches compile with clang on Linux: `clang++ -I custom -DOS_MAC=1 -DOS_LINUX=0 -DOS_WINDOWS=0 -U__gnu_linux__ -U__linux__ -D__APPLE__ -D__MACH__ -DSO_NOSIGPIPE=0x1022 -std=c++11 -fsyntax-only -Wno-write-strings custom/4coder_vim_bindings.cpp` (run it under bash: zsh does not split `$opts`). The `.mm` platform files cannot be checked here.
+- macOS specifics: shell tools differ (no `setsid`; BSD `pgrep`/`sed`), apps started from the Dock get a bare PATH (`import_login_shell_environment` copies PATH/JAVA_HOME from the login shell), `MSG_NOSIGNAL` does not exist (`SO_NOSIGPIPE` on the socket), Ghostty starts with `open -na Ghostty.app --args`. Linux maps Super to `KeyCode_Command`, so Cmd shortcuts (`vim_cmd_*`) are bound only `#if OS_MAC`; to test them, bind them on Linux temporarily and send `super+key` on Xvfb.
 
 - The build driver does **not** stop on compile errors; it keeps going and prints "copy ship_files/themes" at the end regardless. Always grep the output for `error`.
 - Rebuild only the custom layer (fast) from the build dir: `cd ../build && ../code/custom/bin/buildsuper_x64-linux.sh ../code/custom/4coder_vim_bindings.cpp`.
 - Running from `../build` needs `fonts/liberation-mono.ttf`, `config.4coder` and `bindings.4coder` next to the binary; the build never creates them (the install script does). User settings go in `~/.4coder/`, which is searched before the binary's folder.
-- There is no unit test suite. `bin/test-vim-linux.sh` runs every case on a private Xvfb display (`sudo apt install xvfb`). **Never drive the user's real display with synthetic keys while they are working**: focus can move to their own windows mid-test and the keys land there (this happened once). `VIM_TEST_REAL_DISPLAY=1` exists only for when the user explicitly agrees. Add a `check` line there for every vim behavior you add or fix. Re-indent on save is off (vimrc behavior), so `.java` cases keep their indentation as typed. When driving windows with xdotool yourself, use `xdotool search --all --onlyvisible --pid ... --name ""` (the default matches *any* condition; never search by title, which is only the version number) and note that 4coder started through the `4coder` symlink runs as a process named `4coder`, not `4ed`.
+- There is no unit test suite. `bin/test-vim-linux.sh` runs every case on a private Xvfb display (`sudo apt install xvfb`). **Never drive the user's real display with synthetic keys while they are working**: focus can move to their own windows mid-test and the keys land there (this happened once). `VIM_TEST_REAL_DISPLAY=1` exists only for when the user explicitly agrees. Add a `check` line there for every vim behavior you add or fix. Re-indent on save is off (vimrc behavior), so `.java` cases keep their indentation as typed. When driving windows with xdotool yourself, use `xdotool search --all --onlyvisible --pid ... --name ""` (the default matches *any* condition; never search by title) and note that 4coder started through the `4coder` symlink runs as a process named `4coder`, not `4ed`.
 
 ## Architecture
 
 Three binaries, built by `bin/4ed_build.cpp` (a C++ program the shell script compiles and runs):
 
-- `4ed` — platform layer (`platform_linux/linux_4ed.cpp`, X11 + OpenGL + FreeType). Loads the other two from the directory of the real executable (`/proc/self/exe`, so symlinks work).
+- `4ed` — platform layer (`platform_linux/linux_4ed.cpp`, X11 + OpenGL + FreeType; `platform_mac/mac_4ed.mm`, Cocoa + Metal). Loads the other two from the directory of the real executable (`/proc/self/exe` / `proc_pidpath`, so symlinks work).
 - `4ed_app.so` — the core (`4ed_app_target.cpp` is a unity build of the `4ed_*.cpp` files): buffers, history, layout, views, the input loop in `4ed.cpp`.
 - `custom_4coder.so` — the custom layer, everything in `custom/`. Entry point is `custom_layer_init`. `default_custom_target` in `bin/4ed_build.cpp` selects the entry file; it is `custom/4coder_vim_bindings.cpp` (the stock one is `4coder_default_bindings.cpp`).
 

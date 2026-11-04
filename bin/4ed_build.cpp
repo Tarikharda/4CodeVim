@@ -393,12 +393,16 @@ build(Arena *arena, u32 flags, u32 arch, char *code_path, char **code_files, cha
 
 #if OS_MAC
 
+// NOTE: 4coder-non-source (with its x86 only libfreetype-mac.a) is not around: FreeType
+// comes from Homebrew through pkg-config (brew install freetype pkg-config), which also
+// works on Apple Silicon.
 # define CLANG_OPTS \
 "-Wno-write-strings -Wno-deprecated-declarations " \
 "-Wno-comment -Wno-switch -Wno-null-dereference " \
 "-Wno-tautological-compare -Wno-unused-result " \
 "-Wno-missing-declarations -Wno-nullability-completeness " \
-"-std=c++11 "
+"-std=c++11 " \
+"$(pkg-config --cflags freetype2)"
 
 #define CLANG_LIBS_COMMON \
 "-framework Cocoa -framework QuartzCore " \
@@ -406,10 +410,9 @@ build(Arena *arena, u32 flags, u32 arch, char *code_path, char **code_files, cha
 "-framework OpenGL -framework IOKit -framework Metal -framework MetalKit "
 
 #define CLANG_LIBS_X64 CLANG_LIBS_COMMON \
-FOREIGN "/x64/libfreetype-mac.a"
+"$(pkg-config --libs freetype2)"
 
-#define CLANG_LIBS_X86 CLANG_LIBS_COMMON \
-FOREIGN "/x86/libfreetype-mac.a"
+#define CLANG_LIBS_X86 CLANG_LIBS_X64
 
 #else
 # error clang options not set for this platform
@@ -422,7 +425,10 @@ build(Arena *arena, u32 flags, u32 arch, char *code_path, char **code_files, cha
     
     switch (arch){
         case Arch_X64:
+#if !defined(__aarch64__)
+        // NOTE: Apple Silicon builds for its own (64 bit) arm64; -m64 is an x86 flag.
         fm_add_to_line(line, "-m64");
+#endif
         fm_add_to_line(line, "-DFTECH_64_BIT"); break;
         
         case Arch_X86:

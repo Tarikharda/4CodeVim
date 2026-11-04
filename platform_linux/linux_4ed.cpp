@@ -832,8 +832,10 @@ linux_x11_init(int argc, char** argv, Plat_Settings* settings) {
     wm_hints->input = True;
     wm_hints->initial_state = NormalState;
     
-    cl_hints->res_name = "4coder";
-    cl_hints->res_class = "4coder";
+    // NOTE: The desktop entry's StartupWMClass matches this, so docks group the window
+    // under "My Editor".
+    cl_hints->res_name = "my-editor";
+    cl_hints->res_class = "MyEditor";
     
     char* win_name_list[] = { WINDOW_NAME };
     XTextProperty win_name;

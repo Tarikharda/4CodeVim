@@ -38,7 +38,7 @@ system_error_box(char *msg){
     }
     
     Window w = XCreateSimpleWindow(dpy, DefaultRootWindow(dpy), 0, 0, win_w, win_h, 0, 0, 0x227A3B);
-    XStoreName(dpy, w, "4coder Error");
+    XStoreName(dpy, w, APP_NAME " Error");
     
     XSizeHints* sh = XAllocSizeHints();
     sh->flags = PMinSize;
@@ -144,7 +144,7 @@ XDrawString(dpy, w, gc1, (x)  , (y)  , (str), (len))
             int y = 30;
             
             {
-                const char title[] = "4coder - Fatal Error";
+                const char title[] = APP_NAME " - Fatal Error";
                 int width = XTextWidth(font, title, sizeof(title)-1);
                 int x = (win_w/2) - (width/2);
                 DRAW_STR(x, y, title, sizeof(title)-1);

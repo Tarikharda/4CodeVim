@@ -37,6 +37,8 @@
 
 # if defined(__APPLE__) && defined(__MACH__)
 #  define OS_MAC 1
+# elif defined(__gnu_linux__)
+#  define OS_LINUX 1
 # else
 #  error This compiler/platform combo is not supported yet
 # endif
@@ -79,9 +81,9 @@
 # error This compiler is not supported yet
 #endif
 
-#if defined(ARCH_X64)
+#if defined(ARCH_X64) || defined(ARCH_ARM64)
 # define ARCH_64BIT 1
-#elif defined(ARCH_X86)
+#elif defined(ARCH_X86) || defined(ARCH_ARM32)
 # define ARCH_32BIT 1
 
 #endif

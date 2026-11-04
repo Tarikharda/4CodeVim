@@ -13,10 +13,16 @@ SOURCE="$1"
 if [ -z "$SOURCE" ]; then
     SOURCE="$(realpath "$CODE_HOME/4coder_default_bindings.cpp")"
 fi
+echo SOURCE = $SOURCE
 
 # NOTE(yuval): Removed -Wno-writable-strings as it is the same as -Wno-write-strings
 opts="-Wno-write-strings -Wno-null-dereference -Wno-comment -Wno-switch -Wno-missing-declarations -Wno-logical-op-parentheses -g -DOS_MAC=1 -DOS_WINDOWS=0 -DOS_LINUX=0"
-arch=-m64
+# NOTE: Apple Silicon builds natively for arm64; -m64 only means something on Intel.
+if [ "$(uname -m)" = "arm64" ]; then
+    arch=""
+else
+    arch=-m64
+fi
 
 debug=-g
 

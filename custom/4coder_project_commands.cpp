@@ -966,7 +966,7 @@ CUSTOM_DOC("Looks for a project.4coder file in the current directory and tries t
     String_ID proj_name_id = vars_string_id_from_var(proj_name_var);
     if (proj_name_id != 0){
         String8 proj_name = vars_read_string(scratch, proj_name_id);
-        String8 title = push_u8_stringf(scratch, "4coder project: %.*s", string_expand(proj_name));
+        String8 title = push_u8_stringf(scratch, APP_NAME " - %.*s", string_expand(proj_name));
         set_window_title(app, title);
     }
 }

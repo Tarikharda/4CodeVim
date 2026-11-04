@@ -3603,6 +3603,117 @@ CUSTOM_DOC("Vim insert mode <c-r>{register}, inserts the contents of a register.
 }
 
 ////////////////////////////////
+// NOTE(vim): macOS Command shortcuts, as in MacVim: Cmd-C/X copy and cut a visual
+// selection to the clipboard, Cmd-V pastes it, Cmd-Z/Shift-Cmd-Z undo and redo, Cmd-A
+// selects everything, Cmd-S saves. Bound only on macOS (Linux maps Super to Command).
+
+// NOTE(vim): Runs vim keys as if typed in normal or visual mode; like . repeat they are
+// not recorded as the last change.
+function void
+vim_run_keys(Application_Links *app, String_Const_u8 keys){
+    View_ID view = get_active_view(app, Access_ReadVisible);
+    Buffer_ID buffer = view_get_buffer(app, view, Access_ReadVisible);
+    if (buffer == 0 || vim_replaying){
+        return;
+    }
+    if (vim_mode == VimMode_Insert || vim_mode == VimMode_Replace){
+        vim_leave_insert(app, view, buffer);
+    }
+    u64 size = clamp_top(keys.size, sizeof(vim_queue_space));
+    block_copy(vim_queue_space, keys.str, size);
+    vim_queue_size = size;
+    vim_queue_pos = 0;
+    vim_replaying = true;
+    u8 c = 0;
+    for (;vim_mode != VimMode_Insert && vim_queue_pop(&c);){
+        vim_execute(app, view, buffer, c);
+        vim_finish_command(app);
+    }
+    vim_replaying = false;
+    vim_queue_size = 0;
+    vim_queue_pos = 0;
+}
+
+CUSTOM_COMMAND_SIG(vim_cmd_copy)
+CUSTOM_DOC("Cmd-C: copies the visual selection to the system clipboard.")
+{
+    if (vim_mode_is_visual(vim_mode)){
+        vim_run_keys(app, string_u8_litexpr("\"+y"));
+    }
+}
+
+CUSTOM_COMMAND_SIG(vim_cmd_cut)
+CUSTOM_DOC("Cmd-X: cuts the visual selection to the system clipboard.")
+{
+    if (vim_mode_is_visual(vim_mode)){
+        vim_run_keys(app, string_u8_litexpr("\"+d"));
+    }
+}
+
+CUSTOM_COMMAND_SIG(vim_cmd_paste)
+CUSTOM_DOC("Cmd-V: pastes the system clipboard (before the cursor, over a selection, or as typed text in insert mode).")
+{
+    View_ID view = get_active_view(app, Access_ReadWriteVisible);
+    Buffer_ID buffer = view_get_buffer(app, view, Access_ReadWriteVisible);
+    if (buffer == 0){
+        return;
+    }
+    if (vim_mode == VimMode_Insert || vim_mode == VimMode_Replace){
+        Scratch_Block scratch(app);
+        String_Const_u8 text = {};
+        b32 linewise = false;
+        if (vim_register_get(app, scratch, '+', &text, &linewise)){
+            i64 pos = view_get_cursor_pos(app, view);
+            buffer_replace_range(app, buffer, Ii64(pos), text);
+            vim_set_cursor(app, view, pos + text.size);
+        }
+    }
+    else if (vim_mode_is_visual(vim_mode)){
+        vim_run_keys(app, string_u8_litexpr("\"+p"));
+    }
+    else{
+        vim_run_keys(app, string_u8_litexpr("\"+P"));
+    }
+}
+
+CUSTOM_COMMAND_SIG(vim_cmd_undo)
+CUSTOM_DOC("Cmd-Z: undo (leaves insert or visual mode first).")
+{
+    if (vim_mode_is_visual(vim_mode)){
+        View_ID view = get_active_view(app, Access_ReadVisible);
+        vim_set_mode(app, view, VimMode_Normal);
+    }
+    vim_run_keys(app, string_u8_litexpr("u"));
+}
+
+CUSTOM_COMMAND_SIG(vim_cmd_redo)
+CUSTOM_DOC("Shift-Cmd-Z: redo.")
+{
+    if (vim_mode_is_visual(vim_mode)){
+        View_ID view = get_active_view(app, Access_ReadVisible);
+        vim_set_mode(app, view, VimMode_Normal);
+    }
+    u8 keys[1] = {VimCtrl('r')};
+    vim_run_keys(app, SCu8(keys, 1));
+}
+
+CUSTOM_COMMAND_SIG(vim_cmd_select_all)
+CUSTOM_DOC("Cmd-A: selects the whole buffer in visual line mode.")
+{
+    if (vim_mode_is_visual(vim_mode)){
+        View_ID view = get_active_view(app, Access_ReadVisible);
+        vim_set_mode(app, view, VimMode_Normal);
+    }
+    vim_run_keys(app, string_u8_litexpr("ggVG"));
+}
+
+CUSTOM_COMMAND_SIG(vim_cmd_save)
+CUSTOM_DOC("Cmd-S: saves the buffer, staying in the current mode.")
+{
+    save(app);
+}
+
+////////////////////////////////
 // NOTE(vim): Insert mode completion keys
 
 // NOTE(vim): Typed text goes through 4coder's normal insert (auto indent included) and then
@@ -4366,6 +4477,24 @@ vim_setup_mapping(Mapping *mapping){
     SelectMap(vim_map_replace);
     ParentMap(vim_map_insert);
     Bind(vim_left,               KeyCode_Backspace);
+
+#if OS_MAC
+    // NOTE(vim): Visual and replace inherit these from normal and insert.
+    String_ID cmd_maps[] = {vim_map_normal, vim_map_insert};
+    for (i32 i = 0; i < ArrayCount(cmd_maps); i += 1){
+        SelectMap(cmd_maps[i]);
+        Bind(vim_cmd_save,           KeyCode_S, KeyCode_Command);
+        Bind(vim_cmd_copy,           KeyCode_C, KeyCode_Command);
+        Bind(vim_cmd_cut,            KeyCode_X, KeyCode_Command);
+        Bind(vim_cmd_paste,          KeyCode_V, KeyCode_Command);
+        Bind(vim_cmd_undo,           KeyCode_Z, KeyCode_Command);
+        Bind(vim_cmd_redo,           KeyCode_Z, KeyCode_Command, KeyCode_Shift);
+        Bind(vim_cmd_select_all,     KeyCode_A, KeyCode_Command);
+        Bind(increase_face_size,     KeyCode_Equal, KeyCode_Command);
+        Bind(decrease_face_size,     KeyCode_Minus, KeyCode_Command);
+        Bind(exit_4coder,            KeyCode_Q, KeyCode_Command);
+    }
+#endif
 }
 
 function void
