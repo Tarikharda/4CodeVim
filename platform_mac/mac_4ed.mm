@@ -1254,7 +1254,8 @@ main(int arg_count, char **args){
 
         // NOTE: Holding a key repeats it (hjkl in vim normal mode) instead of opening the
         // accent picker; like MacVim, unless the user set it globally.
-        [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"ApplePressAndHoldEnabled": @NO}];
+        [[NSUserDefaults standardUserDefaults] registerDefaults:
+         [NSDictionary dictionaryWithObject:[NSNumber numberWithBool:NO] forKey:@"ApplePressAndHoldEnabled"]];
 
         FCoder_App_Delegate *app_delegate = [[FCoder_App_Delegate alloc] init];
         [NSApp setDelegate:app_delegate];
