@@ -58,6 +58,7 @@
 
 #include <libproc.h> // NOTE(yuval): Used for proc_pidpath
 #include <Carbon/Carbon.h> // NOTE(yuval): Used for virtual key codes
+#include <AudioToolbox/AudioToolbox.h> // NOTE: Used for the audio output queue
 #include <mach/mach_time.h> // NOTE(yuval): Used for mach_absolute_time, mach_timebase_info, mach_timebase_info_data_t
 
 #include <dirent.h> // NOTE(yuval): Used for opendir, readdir
@@ -231,6 +232,13 @@ struct Mac_Vars {
     System_Mutex global_frame_mutex;
 
     Log_Function *log_string;
+
+    pthread_mutex_t audio_mutex;
+    void *audio_ctx;
+    Audio_Mix_Sources_Function *audio_src_func;
+    Audio_Mix_Destination_Function *audio_dst_func;
+    AudioQueueRef audio_queue;
+    f32 *audio_mix_buffer;
 };
 
 ////////////////////////////////
@@ -1516,6 +1524,10 @@ main(int arg_count, char **args){
         u32 style_mask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
 
         mac_vars.global_frame_mutex = system_mutex_make();
+
+        // NOTE: Audio output runs from the start, like the ALSA thread on Linux.
+        pthread_mutex_init(&mac_vars.audio_mutex, 0);
+        mac_audio_start();
 
         mac_vars.window = [[NSWindow alloc] initWithContentRect:initial_frame
                            styleMask:style_mask

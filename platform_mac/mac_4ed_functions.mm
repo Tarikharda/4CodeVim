@@ -983,12 +983,87 @@ system_set_key_mode_sig(){
 
 internal void
 system_set_source_mixer(void* ctx, Audio_Mix_Sources_Function* mix_func){
-    // TODO(allen): Audio on Mac
+    pthread_mutex_lock(&mac_vars.audio_mutex);
+    mac_vars.audio_ctx = ctx;
+    mac_vars.audio_src_func = mix_func;
+    pthread_mutex_unlock(&mac_vars.audio_mutex);
 }
 
 internal void
 system_set_destination_mixer(Audio_Mix_Destination_Function* mix_func){
-    // TODO(allen): Audio on Mac
+    pthread_mutex_lock(&mac_vars.audio_mutex);
+    mac_vars.audio_dst_func = mix_func;
+    pthread_mutex_unlock(&mac_vars.audio_mutex);
+}
+
+// NOTE: The CoreAudio counterpart of linux_4ed_audio.cpp: same format (48 kHz, stereo,
+// signed 16 bit, 16 ms buffers, three of them) and the same mixer hooks. The queue calls
+// this on its own thread whenever a buffer has played; without mixers it plays silence.
+global_const u32 mac_audio_samples_per_second = 48000;
+global_const u32 mac_audio_samples_per_buffer = 16*mac_audio_samples_per_second/1000;
+global_const u32 mac_audio_channel_count = 2;
+global_const u32 mac_audio_buffer_count = 3;
+
+function void
+mac_audio_fill(void *user_data, AudioQueueRef queue, AudioQueueBufferRef buffer){
+    Audio_Mix_Sources_Function *audio_mix_src;
+    Audio_Mix_Destination_Function *audio_mix_dst;
+    void *audio_ctx;
+    pthread_mutex_lock(&mac_vars.audio_mutex);
+    audio_mix_src = mac_vars.audio_src_func;
+    audio_mix_dst = mac_vars.audio_dst_func;
+    audio_ctx = mac_vars.audio_ctx;
+    pthread_mutex_unlock(&mac_vars.audio_mutex);
+
+    u32 sample_count = mac_audio_samples_per_buffer;
+    f32 *mix_buffer = mac_vars.audio_mix_buffer;
+    i16 *samples = (i16*)buffer->mAudioData;
+    block_zero(mix_buffer, sample_count*mac_audio_channel_count*sizeof(f32));
+    if (audio_mix_src != 0){
+        audio_mix_src(audio_ctx, mix_buffer, sample_count);
+    }
+    if (audio_mix_dst != 0){
+        audio_mix_dst(samples, mix_buffer, sample_count);
+    }
+    else{
+        block_zero(samples, sample_count*mac_audio_channel_count*sizeof(i16));
+    }
+    buffer->mAudioDataByteSize = sample_count*mac_audio_channel_count*sizeof(i16);
+    AudioQueueEnqueueBuffer(queue, buffer, 0, 0);
+}
+
+function void
+mac_audio_start(void){
+    AudioStreamBasicDescription format = {};
+    format.mSampleRate = mac_audio_samples_per_second;
+    format.mFormatID = kAudioFormatLinearPCM;
+    format.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
+    format.mChannelsPerFrame = mac_audio_channel_count;
+    format.mBitsPerChannel = 16;
+    format.mBytesPerFrame = mac_audio_channel_count*sizeof(i16);
+    format.mFramesPerPacket = 1;
+    format.mBytesPerPacket = format.mBytesPerFrame;
+
+    mac_vars.audio_mix_buffer = (f32*)system_memory_allocate(mac_audio_samples_per_buffer*mac_audio_channel_count*sizeof(f32), file_name_line_number_lit_u8);
+
+    // NOTE: A null run loop: the queue calls mac_audio_fill on its own thread.
+    OSStatus status = AudioQueueNewOutput(&format, mac_audio_fill, 0, 0, 0, 0, &mac_vars.audio_queue);
+    if (status != noErr){
+        fprintf(stderr, "audio: AudioQueueNewOutput failed (%d), no sound\n", (i32)status);
+        mac_vars.audio_queue = 0;
+        return;
+    }
+    u32 byte_size = mac_audio_samples_per_buffer*format.mBytesPerFrame;
+    for (u32 i = 0; i < mac_audio_buffer_count; i += 1){
+        AudioQueueBufferRef buffer = 0;
+        if (AudioQueueAllocateBuffer(mac_vars.audio_queue, byte_size, &buffer) == noErr){
+            mac_audio_fill(0, mac_vars.audio_queue, buffer);
+        }
+    }
+    status = AudioQueueStart(mac_vars.audio_queue, 0);
+    if (status != noErr){
+        fprintf(stderr, "audio: AudioQueueStart failed (%d), no sound\n", (i32)status);
+    }
 }
 
 ////////////////////////////////
