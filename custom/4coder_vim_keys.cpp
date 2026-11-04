@@ -105,6 +105,8 @@ global char vim_keys_text[] =
 "  Terminal        Space ft  at the project root    Space fT  at the start folder\n"
 "\n"
 "== LANGUAGE SERVER (normal) ===============================================\n"
+"  Java: jdtls     Kotlin: kotlin-lsp       Zig: zls     (from PATH or Mason; started\n"
+"                  on the first file, output in ~/.cache/4coder/lsp/<server>.log)\n"
 "  gd  Ctrl-]      go to definition         gD  ge     declaration (ge also definition)\n"
 "  gI gy           implementation / type definition\n"
 "  gr gn           references               gh         hover docs    gK  signature\n"

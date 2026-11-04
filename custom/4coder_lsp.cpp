@@ -1,5 +1,5 @@
 /*
-4coder_lsp.cpp - A small language server client, set up for Java with jdtls.
+4coder_lsp.cpp - A small language server client: jdtls for Java, kotlin-lsp for Kotlin, zls for Zig.
 */
 
 // TOP
@@ -535,8 +535,10 @@ lsp_reader_thread(void *ptr){
     system_signal_step(0);
 }
 
+// NOTE(lsp): The server's stderr goes to log_path (truncated each start), so a server
+// that dies at startup leaves its reason somewhere to read.
 function Lsp_Connection*
-lsp_spawn(char **argv, char *dir){
+lsp_spawn(char **argv, char *dir, char *log_path){
     i32 in_pair[2];
     i32 out_pipe[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, in_pair) != 0){
@@ -553,9 +555,12 @@ lsp_spawn(char **argv, char *dir){
         setpgid(0, 0);
         dup2(in_pair[1], 0);
         dup2(out_pipe[1], 1);
-        i32 null_fd = open("/dev/null", O_WRONLY);
-        if (null_fd >= 0){
-            dup2(null_fd, 2);
+        i32 log_fd = open(log_path, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        if (log_fd < 0){
+            log_fd = open("/dev/null", O_WRONLY);
+        }
+        if (log_fd >= 0){
+            dup2(log_fd, 2);
         }
         for (i32 fd = 3; fd < 1024; fd += 1){
             close(fd);
@@ -604,7 +609,7 @@ lsp_reap(Lsp_Connection *connection){
 }
 #else
 function Lsp_Connection*
-lsp_spawn(char **argv, char *dir){
+lsp_spawn(char **argv, char *dir, char *log_path){
     return(0);
 }
 function b32
@@ -649,18 +654,36 @@ struct Lsp_Pending{
     Lsp_Message *response;
 };
 
-global Lsp_Connection *lsp_connection = 0;
-global b32 lsp_initialized = false;
-global b32 lsp_unavailable = false;
+// NOTE(lsp): One server per language. The code below works on lsp_server; entry points
+// choose it (lsp_select_buffer), and finding a document by buffer or path switches to
+// the server that owns it, so the protocol code needs no server argument.
+typedef i32 Lsp_Language;
+enum{
+    LspLanguage_Java,
+    LspLanguage_Kotlin,
+    LspLanguage_Zig,
+    LspLanguage_COUNT,
+};
+
+struct Lsp_Server{
+    Lsp_Language language;
+    Lsp_Connection *connection;
+    b32 initialized;
+    b32 unavailable;
+    i64 initialize_id;
+    Arena arena;
+    Lsp_Document *first_document;
+    String_Const_u8 roots[64];
+    i32 root_count;
+    Lsp_Pending pending[16];
+    u8 status_space[96];
+    String_Const_u8 status;
+};
+
+global Lsp_Server lsp_servers[LspLanguage_COUNT] = {};
+global Lsp_Server *lsp_server = &lsp_servers[0];
+// NOTE(lsp): Ids are unique across servers, so asynchronous answers never mix up.
 global i64 lsp_next_id = 1;
-global i64 lsp_initialize_id = 0;
-global Arena lsp_arena = {};
-global Lsp_Document *lsp_first_document = 0;
-global String_Const_u8 lsp_roots[64] = {};
-global i32 lsp_root_count = 0;
-global Lsp_Pending lsp_pending[16] = {};
-global u8 lsp_status_space[96];
-global String_Const_u8 lsp_status = {};
 global u64 lsp_last_scan_time = 0;
 global b32 lsp_exit_handler_installed = false;
 
@@ -676,25 +699,77 @@ CUSTOM_ID(colors, defcolor_lsp_popup_back);
 
 function void
 lsp_set_status(String_Const_u8 status){
-    u64 size = clamp_top(status.size, sizeof(lsp_status_space));
-    block_copy(lsp_status_space, status.str, size);
-    lsp_status = SCu8(lsp_status_space, size);
+    u64 size = clamp_top(status.size, sizeof(lsp_server->status_space));
+    block_copy(lsp_server->status_space, status.str, size);
+    lsp_server->status = SCu8(lsp_server->status_space, size);
 }
 
-function b32
-lsp_buffer_is_java(Application_Links *app, Buffer_ID buffer){
+// NOTE(lsp): Per language: the name shown in the file bar, the LSP languageId, the file
+// extensions, the files that mark a project root (closest first wins), the config key
+// that overrides the command, and the commands looked up on PATH and then in Mason.
+struct Lsp_Language_Info{
+    char *name;
+    char *language_id;
+    char *extensions[4];
+    char *root_markers[12];
+    char *config_key;
+    char *commands[4];
+};
+
+global Lsp_Language_Info lsp_languages[LspLanguage_COUNT] = {
+    {"jdtls", "java", {"java"},
+        {"settings.gradle", "settings.gradle.kts", "build.gradle", "build.gradle.kts",
+            "pom.xml", "build.xml", ".project", ".classpath", "mvnw", "gradlew", ".git"},
+        "lsp_java_command", {"jdtls"}},
+    // NOTE(lsp): JetBrains' kotlin-lsp (Mason installs it as intellij-server), or fwcd's
+    // kotlin-language-server that the vimrc names.
+    {"kotlin-lsp", "kotlin", {"kt", "kts"},
+        {"settings.gradle.kts", "settings.gradle", "build.gradle.kts", "build.gradle",
+            "pom.xml", "gradlew", ".git"},
+        "lsp_kotlin_command", {"kotlin-lsp", "intellij-server", "kotlin-language-server"}},
+    {"zls", "zig", {"zig", "zon"},
+        {"build.zig", "build.zig.zon", ".git"},
+        "lsp_zig_command", {"zls"}},
+};
+
+// NOTE(lsp): The language server for a buffer's file, or -1.
+function Lsp_Language
+lsp_language_from_buffer(Application_Links *app, Buffer_ID buffer){
     Scratch_Block scratch(app);
     String_Const_u8 file_name = push_buffer_file_name(app, scratch, buffer);
-    return(file_name.size > 0 && string_match(string_file_extension(file_name), string_u8_litexpr("java")));
+    String_Const_u8 ext = string_file_extension(file_name);
+    Lsp_Language result = -1;
+    for (i32 i = 0; i < LspLanguage_COUNT && result < 0 && file_name.size > 0; i += 1){
+        for (i32 j = 0; j < ArrayCount(lsp_languages[i].extensions) && lsp_languages[i].extensions[j] != 0; j += 1){
+            if (string_match(ext, SCu8(lsp_languages[i].extensions[j]))){
+                result = i;
+                break;
+            }
+        }
+    }
+    return(result);
+}
+
+// NOTE(lsp): Makes the buffer's server current; false when no server handles the file.
+function b32
+lsp_select_buffer(Application_Links *app, Buffer_ID buffer){
+    Lsp_Language language = lsp_language_from_buffer(app, buffer);
+    if (language >= 0){
+        lsp_server = &lsp_servers[language];
+    }
+    return(language >= 0);
 }
 
 function Lsp_Document*
 lsp_document_from_buffer(Buffer_ID buffer){
     Lsp_Document *result = 0;
-    for (Lsp_Document *doc = lsp_first_document; doc != 0; doc = doc->next){
-        if (doc->buffer == buffer){
-            result = doc;
-            break;
+    for (i32 i = 0; i < LspLanguage_COUNT && result == 0; i += 1){
+        for (Lsp_Document *doc = lsp_servers[i].first_document; doc != 0; doc = doc->next){
+            if (doc->buffer == buffer){
+                result = doc;
+                lsp_server = &lsp_servers[i];
+                break;
+            }
         }
     }
     return(result);
@@ -703,22 +778,30 @@ lsp_document_from_buffer(Buffer_ID buffer){
 function Lsp_Document*
 lsp_document_from_path(String_Const_u8 path){
     Lsp_Document *result = 0;
-    for (Lsp_Document *doc = lsp_first_document; doc != 0; doc = doc->next){
-        if (string_match(doc->path, path)){
-            result = doc;
-            break;
+    for (i32 i = 0; i < LspLanguage_COUNT && result == 0; i += 1){
+        for (Lsp_Document *doc = lsp_servers[i].first_document; doc != 0; doc = doc->next){
+            if (string_match(doc->path, path)){
+                result = doc;
+                lsp_server = &lsp_servers[i];
+                break;
+            }
         }
     }
     return(result);
 }
 
+function String_Const_u8
+lsp_server_name(void){
+    return(SCu8(lsp_languages[lsp_server->language].name));
+}
+
 function void
 lsp_send(Application_Links *app, String_Const_u8 body){
-    if (lsp_connection != 0){
+    if (lsp_server->connection != 0){
         Scratch_Block scratch(app);
         String_Const_u8 header = push_u8_stringf(scratch, "Content-Length: %llu\r\n\r\n", body.size);
-        lsp_write_all(lsp_connection->in_fd, header.str, header.size);
-        lsp_write_all(lsp_connection->in_fd, body.str, body.size);
+        lsp_write_all(lsp_server->connection->in_fd, header.str, header.size);
+        lsp_write_all(lsp_server->connection->in_fd, body.str, body.size);
     }
 }
 
@@ -741,8 +824,10 @@ lsp_send_request(Application_Links *app, char *method, String_Const_u8 params){
 // instead of leaving it to lsp-watchdog.
 function void
 lsp_on_exit(void){
-    if (lsp_connection != 0){
-        lsp_kill(lsp_connection);
+    for (i32 i = 0; i < LspLanguage_COUNT; i += 1){
+        if (lsp_servers[i].connection != 0){
+            lsp_kill(lsp_servers[i].connection);
+        }
     }
 }
 
@@ -751,8 +836,10 @@ lsp_on_exit(void){
 // and then die the way the signal would have.
 function void
 lsp_on_signal(i32 signal_number){
-    if (lsp_connection != 0){
-        kill(-(pid_t)lsp_connection->pid, SIGTERM);
+    for (i32 i = 0; i < LspLanguage_COUNT; i += 1){
+        if (lsp_servers[i].connection != 0){
+            kill(-(pid_t)lsp_servers[i].connection->pid, SIGTERM);
+        }
     }
     signal(signal_number, SIG_DFL);
     raise(signal_number);
@@ -762,14 +849,11 @@ lsp_on_signal(i32 signal_number){
 ////////////////////////////////
 // NOTE(lsp): jdtls setup
 
-global char *lsp_java_root_markers[] = {
-    "settings.gradle", "settings.gradle.kts", "build.gradle", "build.gradle.kts",
-    "pom.xml", "build.xml", ".project", ".classpath", "mvnw", "gradlew", ".git",
-};
-
-// NOTE(lsp): The closest parent folder of the file that holds one of the root markers.
+// NOTE(lsp): The closest parent folder of the file that holds one of the current server's
+// root markers.
 function String_Const_u8
-lsp_java_root(Application_Links *app, Arena *arena, String_Const_u8 file_name){
+lsp_project_root(Application_Links *app, Arena *arena, String_Const_u8 file_name){
+    char **markers = lsp_languages[lsp_server->language].root_markers;
     String_Const_u8 file_dir = string_remove_last_folder(file_name);
     String_Const_u8 dir = file_dir;
     String_Const_u8 result = {};
@@ -777,8 +861,8 @@ lsp_java_root(Application_Links *app, Arena *arena, String_Const_u8 file_name){
         for (;dir.size > 1 && character_is_slash(string_get_character(dir, dir.size - 1));){
             dir = string_chop(dir, 1);
         }
-        for (i32 i = 0; i < ArrayCount(lsp_java_root_markers); i += 1){
-            String_Const_u8 marker = push_u8_stringf(arena, "%.*s/%s", string_expand(dir), lsp_java_root_markers[i]);
+        for (i32 i = 0; i < ArrayCount(lsp_languages[0].root_markers) && markers[i] != 0; i += 1){
+            String_Const_u8 marker = push_u8_stringf(arena, "%.*s/%s", string_expand(dir), markers[i]);
             if (file_exists(app, marker)){
                 result = dir;
                 break;
@@ -817,29 +901,30 @@ lsp_is_executable(Arena *arena, String_Const_u8 path){
     return(result);
 }
 
+// NOTE(lsp): The current server's command: the config override, then each candidate on
+// PATH, then in Mason's bin folder.
 function String_Const_u8
-lsp_find_jdtls(Application_Links *app, Arena *arena){
-    String_Const_u8 result = def_get_config_string(arena, vars_save_string_lit("lsp_java_command"));
+lsp_find_server(Application_Links *app, Arena *arena){
+    Lsp_Language_Info *info = &lsp_languages[lsp_server->language];
+    String_Const_u8 result = def_get_config_string(arena, vars_save_string_lit(info->config_key));
     result = lsp_expand_home(arena, result);
     if (result.size > 0 && lsp_is_executable(arena, result)){
         return(result);
     }
     result = string_u8_empty;
     char *path_env = getenv("PATH");
+    List_String_Const_u8 dirs = {};
     if (path_env != 0){
-        List_String_Const_u8 dirs = string_split(arena, SCu8(path_env), (u8*)":", 1);
+        dirs = string_split(arena, SCu8(path_env), (u8*)":", 1);
+    }
+    string_list_push(arena, &dirs, lsp_expand_home(arena, string_u8_litexpr("~/.local/share/nvim/mason/bin")));
+    for (i32 i = 0; i < ArrayCount(info->commands) && info->commands[i] != 0 && result.size == 0; i += 1){
         for (Node_String_Const_u8 *node = dirs.first; node != 0; node = node->next){
-            String_Const_u8 candidate = push_u8_stringf(arena, "%.*s/jdtls", string_expand(node->string));
+            String_Const_u8 candidate = push_u8_stringf(arena, "%.*s/%s", string_expand(node->string), info->commands[i]);
             if (lsp_is_executable(arena, candidate)){
                 result = candidate;
                 break;
             }
-        }
-    }
-    if (result.size == 0){
-        String_Const_u8 mason = lsp_expand_home(arena, string_u8_litexpr("~/.local/share/nvim/mason/bin/jdtls"));
-        if (lsp_is_executable(arena, mason)){
-            result = mason;
         }
     }
     return(result);
@@ -891,31 +976,17 @@ lsp_java_settings(Application_Links *app, Arena *arena){
     return(push_u8_stringf(arena, "{%.*s}", string_expand(java)));
 }
 
+// NOTE(lsp): jdtls's arguments: lombok as a java agent when Mason ships it, the JVM flags
+// VS Code's Java extension uses (tuned for startup and a responsive heap rather than
+// throughput), and the shared workspace.
 function void
-lsp_start_java(Application_Links *app, String_Const_u8 root){
-    Scratch_Block scratch(app);
-    String_Const_u8 jdtls = lsp_find_jdtls(app, scratch);
-    if (jdtls.size == 0){
-        lsp_unavailable = true;
-        print_message(app, string_u8_litexpr("lsp: jdtls not found; install it with Mason or put it on PATH, or set lsp_java_command\n"));
-        return;
-    }
-
-    String_Const_u8 workspace = lsp_java_workspace(scratch);
-    String_Const_u8 lombok = lsp_expand_home(scratch, string_u8_litexpr("~/.local/share/nvim/mason/share/jdtls/lombok.jar"));
-    String_Const_u8 watchdog = lsp_expand_home(scratch, string_u8_litexpr("~/.config/nvim/bin/lsp-watchdog"));
-
-    char *argv[32] = {};
-    i32 argc = 0;
-    if (lsp_is_executable(scratch, watchdog)){
-        argv[argc++] = (char*)push_string_copy(scratch, watchdog).str;
-    }
-    argv[argc++] = (char*)push_string_copy(scratch, jdtls).str;
+lsp_java_arguments(Application_Links *app, Arena *arena, char **argv, i32 *argc_ptr){
+    i32 argc = *argc_ptr;
+    String_Const_u8 workspace = lsp_java_workspace(arena);
+    String_Const_u8 lombok = lsp_expand_home(arena, string_u8_litexpr("~/.local/share/nvim/mason/share/jdtls/lombok.jar"));
     if (file_exists(app, lombok)){
-        argv[argc++] = (char*)push_u8_stringf(scratch, "--jvm-arg=-javaagent:%.*s", string_expand(lombok)).str;
+        argv[argc++] = (char*)push_u8_stringf(arena, "--jvm-arg=-javaagent:%.*s", string_expand(lombok)).str;
     }
-    // NOTE(lsp): The JVM flags VS Code's Java extension starts jdtls with, tuned for startup
-    // and a responsive heap rather than throughput.
     argv[argc++] = "--jvm-arg=-XX:+UseParallelGC";
     argv[argc++] = "--jvm-arg=-XX:GCTimeRatio=4";
     argv[argc++] = "--jvm-arg=-XX:AdaptiveSizePolicyWeight=90";
@@ -923,18 +994,77 @@ lsp_start_java(Application_Links *app, String_Const_u8 root){
     argv[argc++] = "--jvm-arg=-Xms100m";
     argv[argc++] = "--jvm-arg=-Xmx2G";
     argv[argc++] = "-configuration";
-    argv[argc++] = (char*)push_u8_stringf(scratch, "%.*s/config", string_expand(workspace)).str;
+    argv[argc++] = (char*)push_u8_stringf(arena, "%.*s/config", string_expand(workspace)).str;
     argv[argc++] = "-data";
-    argv[argc++] = (char*)push_u8_stringf(scratch, "%.*s/workspace", string_expand(workspace)).str;
+    argv[argc++] = (char*)push_u8_stringf(arena, "%.*s/workspace", string_expand(workspace)).str;
+    *argc_ptr = argc;
+}
 
-    String_Const_u8 root_z = push_string_copy(scratch, root);
-    lsp_connection = lsp_spawn(argv, (char*)root_z.str);
-    if (lsp_connection == 0){
-        lsp_unavailable = true;
-        print_message(app, string_u8_litexpr("lsp: could not start jdtls\n"));
+// NOTE(lsp): mkdir -p.
+function void
+lsp_make_folders(Arena *arena, String_Const_u8 path){
+#if OS_LINUX || OS_MAC
+    String_Const_u8 path_z = push_string_copy(arena, path);
+    for (u64 i = 1; i <= path_z.size; i += 1){
+        if (i == path_z.size || path_z.str[i] == '/'){
+            u8 c = path_z.str[i];
+            path_z.str[i] = 0;
+            mkdir((char*)path_z.str, 0755);
+            path_z.str[i] = c;
+        }
+    }
+#endif
+}
+
+// NOTE(lsp): Where the current server's stderr goes: ~/.cache/4coder/lsp/<name>.log.
+function String_Const_u8
+lsp_log_path(Arena *arena){
+    return(push_u8_stringf(arena, "%.*s/%s.log",
+                           string_expand(lsp_expand_home(arena, string_u8_litexpr("~/.cache/4coder/lsp"))),
+                           lsp_languages[lsp_server->language].name));
+}
+
+// NOTE(lsp): Starts the current server for a project root.
+function void
+lsp_start(Application_Links *app, String_Const_u8 root){
+    Scratch_Block scratch(app);
+    Lsp_Language_Info *info = &lsp_languages[lsp_server->language];
+    b32 is_java = (lsp_server->language == LspLanguage_Java);
+    String_Const_u8 command = lsp_find_server(app, scratch);
+    if (command.size == 0){
+        lsp_server->unavailable = true;
+        print_message(app, push_u8_stringf(scratch, "lsp: %s not found; install it with Mason or put it on PATH, or set %s\n",
+                                           info->name, info->config_key));
         return;
     }
-    print_message(app, push_u8_stringf(scratch, "lsp: started %.*s for %.*s\n", string_expand(jdtls), string_expand(root)));
+
+    // NOTE(lsp): lsp-watchdog makes the server die with the editor even when it is killed hard.
+    String_Const_u8 watchdog = lsp_expand_home(scratch, string_u8_litexpr("~/.config/nvim/bin/lsp-watchdog"));
+    char *argv[32] = {};
+    i32 argc = 0;
+    if (lsp_is_executable(scratch, watchdog)){
+        argv[argc++] = (char*)push_string_copy(scratch, watchdog).str;
+    }
+    argv[argc++] = (char*)push_string_copy(scratch, command).str;
+    String_Const_u8 command_name = string_front_of_path(command);
+    if (string_match(command_name, string_u8_litexpr("kotlin-lsp")) ||
+        string_match(command_name, string_u8_litexpr("intellij-server"))){
+        argv[argc++] = "--stdio";
+    }
+    if (is_java){
+        lsp_java_arguments(app, scratch, argv, &argc);
+    }
+
+    String_Const_u8 root_z = push_string_copy(scratch, root);
+    String_Const_u8 log_path = lsp_log_path(scratch);
+    lsp_make_folders(scratch, string_remove_last_folder(log_path));
+    lsp_server->connection = lsp_spawn(argv, (char*)root_z.str, (char*)log_path.str);
+    if (lsp_server->connection == 0){
+        lsp_server->unavailable = true;
+        print_message(app, push_u8_stringf(scratch, "lsp: could not start %s\n", info->name));
+        return;
+    }
+    print_message(app, push_u8_stringf(scratch, "lsp: started %.*s for %.*s\n", string_expand(command), string_expand(root)));
     if (!lsp_exit_handler_installed){
         lsp_exit_handler_installed = true;
         atexit(lsp_on_exit);
@@ -946,12 +1076,18 @@ lsp_start_java(Application_Links *app, String_Const_u8 root){
     }
     lsp_set_status(string_u8_litexpr("starting"));
 
-    lsp_root_count = 0;
-    lsp_roots[lsp_root_count++] = push_string_copy(&lsp_arena, root);
+    lsp_server->root_count = 0;
+    lsp_server->roots[lsp_server->root_count++] = push_string_copy(&lsp_server->arena, root);
 
     String_Const_u8 root_uri = json_escape(scratch, lsp_uri_from_path(scratch, root));
     String_Const_u8 root_name = json_escape(scratch, root);
-    String_Const_u8 settings = lsp_java_settings(app, scratch);
+    // NOTE(lsp): Only jdtls gets settings and its extended capabilities (jdt:// sources).
+    String_Const_u8 options = string_u8_litexpr("{}");
+    if (is_java){
+        options = push_u8_stringf(scratch, "{\"settings\":{\"java\":%.*s},"
+                                  "\"extendedClientCapabilities\":{\"classFileContentsSupport\":true}}",
+                                  string_expand(lsp_java_settings(app, scratch)));
+    }
     String_Const_u8 params = push_u8_stringf(scratch,
                                              "{\"processId\":%d,\"rootUri\":\"%.*s\",\"rootPath\":\"%.*s\","
                                              "\"workspaceFolders\":[{\"uri\":\"%.*s\",\"name\":\"%.*s\"}],"
@@ -978,11 +1114,10 @@ lsp_start_java(Application_Links *app, String_Const_u8 root){
                                              "[\"quickfix\",\"refactor\",\"refactor.extract\",\"refactor.inline\",\"refactor.rewrite\","
                                              "\"source\",\"source.organizeImports\"]}}},"
                                              "\"publishDiagnostics\":{\"relatedInformation\":false}}},"
-                                             "\"initializationOptions\":{\"settings\":{\"java\":%.*s},"
-                                             "\"extendedClientCapabilities\":{\"classFileContentsSupport\":true}}}",
+                                             "\"initializationOptions\":%.*s}",
                                              (i32)getpid(), string_expand(root_uri), string_expand(root_name),
-                                             string_expand(root_uri), string_expand(root_name), string_expand(settings));
-    lsp_initialize_id = lsp_send_request(app, "initialize", params);
+                                             string_expand(root_uri), string_expand(root_name), string_expand(options));
+    lsp_server->initialize_id = lsp_send_request(app, "initialize", params);
 }
 
 ////////////////////////////////
@@ -990,13 +1125,13 @@ lsp_start_java(Application_Links *app, String_Const_u8 root){
 
 function void
 lsp_add_root(Application_Links *app, String_Const_u8 root){
-    for (i32 i = 0; i < lsp_root_count; i += 1){
-        if (string_match(lsp_roots[i], root)){
+    for (i32 i = 0; i < lsp_server->root_count; i += 1){
+        if (string_match(lsp_server->roots[i], root)){
             return;
         }
     }
-    if (lsp_root_count < ArrayCount(lsp_roots)){
-        lsp_roots[lsp_root_count++] = push_string_copy(&lsp_arena, root);
+    if (lsp_server->root_count < ArrayCount(lsp_server->roots)){
+        lsp_server->roots[lsp_server->root_count++] = push_string_copy(&lsp_server->arena, root);
         Scratch_Block scratch(app);
         lsp_notify(app, "workspace/didChangeWorkspaceFolders",
                    push_u8_stringf(scratch, "{\"event\":{\"added\":[{\"uri\":\"%.*s\",\"name\":\"%.*s\"}],\"removed\":[]}}",
@@ -1011,23 +1146,24 @@ function void
 lsp_open_document(Application_Links *app, Buffer_ID buffer){
     Scratch_Block scratch(app);
     String_Const_u8 path = push_buffer_file_name(app, scratch, buffer);
-    lsp_add_root(app, lsp_java_root(app, scratch, path));
+    lsp_add_root(app, lsp_project_root(app, scratch, path));
 
-    Lsp_Document *doc = push_array_zero(&lsp_arena, Lsp_Document, 1);
+    Lsp_Document *doc = push_array_zero(&lsp_server->arena, Lsp_Document, 1);
     doc->buffer = buffer;
-    doc->path = push_string_copy(&lsp_arena, path);
-    doc->uri = lsp_uri_from_path(&lsp_arena, path);
+    doc->path = push_string_copy(&lsp_server->arena, path);
+    doc->uri = lsp_uri_from_path(&lsp_server->arena, path);
     doc->version = 1;
     doc->synced_history = buffer_history_get_current_state_index(app, buffer);
     doc->synced_size = buffer_get_size(app, buffer);
     doc->diagnostic_arena = make_arena_system();
-    sll_stack_push(lsp_first_document, doc);
+    sll_stack_push(lsp_server->first_document, doc);
 
     String_Const_u8 text = push_whole_buffer(app, scratch, buffer);
     lsp_document_store_text(doc, text);
     lsp_notify(app, "textDocument/didOpen",
-               push_u8_stringf(scratch, "{\"textDocument\":{\"uri\":\"%.*s\",\"languageId\":\"java\",\"version\":1,\"text\":\"%.*s\"}}",
-                               string_expand(json_escape(scratch, doc->uri)), string_expand(json_escape(scratch, text))));
+               push_u8_stringf(scratch, "{\"textDocument\":{\"uri\":\"%.*s\",\"languageId\":\"%s\",\"version\":1,\"text\":\"%.*s\"}}",
+                               string_expand(json_escape(scratch, doc->uri)), lsp_languages[lsp_server->language].language_id,
+                               string_expand(json_escape(scratch, text))));
 }
 
 function void
@@ -1113,20 +1249,22 @@ lsp_sync_document(Application_Links *app, Lsp_Document *doc){
 
 function void
 lsp_reset_documents(void){
-    for (Lsp_Document *doc = lsp_first_document; doc != 0; doc = doc->next){
+    for (Lsp_Document *doc = lsp_server->first_document; doc != 0; doc = doc->next){
         linalloc_clear(&doc->diagnostic_arena);
         if (doc->synced_text.str != 0){
             base_free(get_base_allocator_system(), doc->synced_text.str);
         }
     }
-    lsp_first_document = 0;
-    lsp_root_count = 0;
+    lsp_server->first_document = 0;
+    lsp_server->root_count = 0;
 }
 
-// NOTE(lsp): Opens every Java buffer with the server and closes the ones that are gone.
+// NOTE(lsp): Opens the current server's buffers with it (starting it for the first one)
+// and closes the ones that are gone.
 function void
 lsp_scan_buffers(Application_Links *app){
-    for (Lsp_Document **ptr = &lsp_first_document; *ptr != 0;){
+    Lsp_Server *server = lsp_server;
+    for (Lsp_Document **ptr = &lsp_server->first_document; *ptr != 0;){
         Lsp_Document *doc = *ptr;
         if (!buffer_exists(app, doc->buffer)){
             Scratch_Block scratch(app);
@@ -1146,16 +1284,21 @@ lsp_scan_buffers(Application_Links *app){
     for (Buffer_ID buffer = get_buffer_next(app, 0, Access_Always);
          buffer != 0;
          buffer = get_buffer_next(app, buffer, Access_Always)){
-        if (lsp_document_from_buffer(buffer) == 0 && lsp_buffer_is_java(app, buffer)){
-            if (lsp_connection == 0){
-                if (!lsp_unavailable){
+        if (lsp_language_from_buffer(app, buffer) != server->language){
+            continue;
+        }
+        b32 is_open = (lsp_document_from_buffer(buffer) != 0);
+        lsp_server = server;
+        if (!is_open){
+            if (lsp_server->connection == 0){
+                if (!lsp_server->unavailable){
                     Scratch_Block scratch(app);
                     String_Const_u8 path = push_buffer_file_name(app, scratch, buffer);
-                    lsp_start_java(app, lsp_java_root(app, scratch, path));
+                    lsp_start(app, lsp_project_root(app, scratch, path));
                 }
                 break;
             }
-            if (lsp_initialized){
+            if (lsp_server->initialized){
                 lsp_open_document(app, buffer);
             }
         }
@@ -1247,30 +1390,36 @@ lsp_handle_message(Application_Links *app, Lsp_Message *message){
             if (string_match(type, string_u8_litexpr("ServiceReady"))){
                 lsp_set_status(string_u8_litexpr("ready"));
             }
-            else if (!string_match(lsp_status, string_u8_litexpr("ready"))){
+            else if (!string_match(lsp_server->status, string_u8_litexpr("ready"))){
                 lsp_set_status(json_get(params, "message")->string);
             }
         }
         else if (string_match(method->string, string_u8_litexpr("window/showMessage"))){
-            print_message(app, push_u8_stringf(scratch, "jdtls: %.*s\n", string_expand(json_get(params, "message")->string)));
+            print_message(app, push_u8_stringf(scratch, "%.*s: %.*s\n", string_expand(lsp_server_name()),
+                                               string_expand(json_get(params, "message")->string)));
         }
     }
     else if (id->kind == JsonKind_Number){
         i64 id_number = json_i64(id);
-        if (id_number == lsp_initialize_id){
-            lsp_initialized = true;
+        if (id_number == lsp_server->initialize_id){
+            lsp_server->initialized = true;
             lsp_notify(app, "initialized", string_u8_litexpr("{}"));
-            lsp_notify(app, "workspace/didChangeConfiguration",
-                       push_u8_stringf(scratch, "{\"settings\":{\"java\":%.*s}}", string_expand(lsp_java_settings(app, scratch))));
+            if (lsp_server->language == LspLanguage_Java){
+                lsp_notify(app, "workspace/didChangeConfiguration",
+                           push_u8_stringf(scratch, "{\"settings\":{\"java\":%.*s}}", string_expand(lsp_java_settings(app, scratch))));
+            }
+            else{
+                lsp_set_status(string_u8_litexpr("ready"));
+            }
             lsp_scan_buffers(app);
         }
         if (lsp_handle_async_response(app, id_number, json)){
             id_number = 0;
         }
-        for (i32 i = 0; id_number != 0 && i < ArrayCount(lsp_pending); i += 1){
-            if (lsp_pending[i].id == id_number && !lsp_pending[i].done){
-                lsp_pending[i].done = true;
-                lsp_pending[i].response = message;
+        for (i32 i = 0; id_number != 0 && i < ArrayCount(lsp_server->pending); i += 1){
+            if (lsp_server->pending[i].id == id_number && !lsp_server->pending[i].done){
+                lsp_server->pending[i].done = true;
+                lsp_server->pending[i].response = message;
                 keep_message = true;
                 break;
             }
@@ -1284,15 +1433,16 @@ lsp_handle_message(Application_Links *app, Lsp_Message *message){
 
 function void lsp_update_popups(Application_Links *app, View_ID active_view);
 
+// NOTE(lsp): One server's messages, exit and document sync.
 function void
-lsp_update(Application_Links *app){
-    if (lsp_connection != 0){
-        system_mutex_acquire(lsp_connection->mutex);
-        Lsp_Message *first = lsp_connection->first;
-        b32 closed = lsp_connection->closed;
-        lsp_connection->first = 0;
-        lsp_connection->last = 0;
-        system_mutex_release(lsp_connection->mutex);
+lsp_update_server(Application_Links *app, b32 scan){
+    if (lsp_server->connection != 0){
+        system_mutex_acquire(lsp_server->connection->mutex);
+        Lsp_Message *first = lsp_server->connection->first;
+        b32 closed = lsp_server->connection->closed;
+        lsp_server->connection->first = 0;
+        lsp_server->connection->last = 0;
+        system_mutex_release(lsp_server->connection->mutex);
 
         for (Lsp_Message *message = first; message != 0;){
             Lsp_Message *next = message->next;
@@ -1301,26 +1451,42 @@ lsp_update(Application_Links *app){
         }
 
         if (closed){
-            lsp_reap(lsp_connection);
-            lsp_connection = 0;
-            lsp_initialized = false;
-            lsp_unavailable = true;
+            lsp_reap(lsp_server->connection);
+            lsp_server->connection = 0;
+            lsp_server->initialized = false;
+            lsp_server->unavailable = true;
             lsp_reset_documents();
             lsp_set_status(string_u8_litexpr("stopped"));
-            print_message(app, string_u8_litexpr("lsp: jdtls exited, :LspRestart starts it again\n"));
+            Scratch_Block scratch(app);
+            print_message(app, push_u8_stringf(scratch, "lsp: %.*s exited (its output is in %.*s), :LspRestart starts it again\n",
+                                               string_expand(lsp_server_name()), string_expand(lsp_log_path(scratch))));
         }
     }
-
-    u64 now = system_now_time();
-    if (now - lsp_last_scan_time > 500000){
-        lsp_last_scan_time = now;
+    if (scan){
         lsp_scan_buffers(app);
     }
-    if (lsp_initialized){
-        for (Lsp_Document *doc = lsp_first_document; doc != 0; doc = doc->next){
+    if (lsp_server->initialized){
+        for (Lsp_Document *doc = lsp_server->first_document; doc != 0; doc = doc->next){
             lsp_sync_document(app, doc);
         }
     }
+}
+
+// NOTE(lsp): Every server, every frame. Keeps the current server, since requests wait
+// in this loop.
+function void
+lsp_update(Application_Links *app){
+    Lsp_Server *current = lsp_server;
+    u64 now = system_now_time();
+    b32 scan = (now - lsp_last_scan_time > 500000);
+    if (scan){
+        lsp_last_scan_time = now;
+    }
+    for (i32 i = 0; i < LspLanguage_COUNT; i += 1){
+        lsp_server = &lsp_servers[i];
+        lsp_update_server(app, scan);
+    }
+    lsp_server = current;
 
     View_ID active_view = get_active_view(app, Access_Always);
     if (lsp_hover_text.size > 0){
@@ -1338,14 +1504,16 @@ lsp_update(Application_Links *app){
 // Escape cancels. The result lives in arena; returns 0 on failure.
 function Json_Value*
 lsp_request(Application_Links *app, Arena *arena, char *method, String_Const_u8 params){
-    if (lsp_connection == 0 || !lsp_initialized){
-        print_message(app, string_u8_litexpr("lsp: jdtls is not ready yet\n"));
+    if (lsp_server->connection == 0 || !lsp_server->initialized){
+        Scratch_Block scratch(app);
+        print_message(app, push_u8_stringf(scratch, "lsp: %.*s is not ready yet\n", string_expand(lsp_server_name())));
         return(0);
     }
+    Lsp_Server *server = lsp_server;
     Lsp_Pending *pending = 0;
-    for (i32 i = 0; i < ArrayCount(lsp_pending); i += 1){
-        if (lsp_pending[i].id == 0){
-            pending = &lsp_pending[i];
+    for (i32 i = 0; i < ArrayCount(lsp_server->pending); i += 1){
+        if (lsp_server->pending[i].id == 0){
+            pending = &lsp_server->pending[i];
             break;
         }
     }
@@ -1359,7 +1527,8 @@ lsp_request(Application_Links *app, Arena *arena, char *method, String_Const_u8 
     u64 start = system_now_time();
     for (;!pending->done;){
         lsp_update(app);
-        if (pending->done || lsp_connection == 0){
+        lsp_server = server;
+        if (pending->done || lsp_server->connection == 0){
             break;
         }
         if (system_now_time() - start > 20000000){
@@ -1499,7 +1668,7 @@ lsp_location_line_text(Application_Links *app, Arena *arena, String_Const_u8 pat
 function void
 lsp_choose_location(Application_Links *app, View_ID view, Lsp_Location *locations, i32 count, String_Const_u8 query){
     Scratch_Block scratch(app);
-    String_Const_u8 root = (lsp_root_count > 0)?lsp_roots[0]:string_u8_empty;
+    String_Const_u8 root = (lsp_server->root_count > 0)?lsp_server->roots[0]:string_u8_empty;
     Lister_Block lister(app, scratch);
     lister_set_query(lister, query);
     lister_set_default_handlers(lister);
@@ -1651,53 +1820,62 @@ CUSTOM_DOC("Shows the language server's documentation for the symbol under the c
 }
 
 CUSTOM_UI_COMMAND_SIG(lsp_list_diagnostics)
-CUSTOM_DOC("Lists the errors and warnings of all open Java files in an fzf style lister.")
+CUSTOM_DOC("Lists the errors and warnings of all files open with a language server in an fzf style lister.")
 {
     Scratch_Block scratch(app);
     View_ID view = get_active_view(app, Access_Always);
-    String_Const_u8 root = (lsp_root_count > 0)?lsp_roots[0]:string_u8_empty;
     Lister_Block lister(app, scratch);
     lister_set_query(lister, "Diagnostics:");
     lister_set_default_handlers(lister);
     ((Lister*)lister)->fuzzy_filter = true;
-    for (Lsp_Document *doc = lsp_first_document; doc != 0; doc = doc->next){
-        for (i32 i = 0; i < doc->diagnostic_count; i += 1){
-            Lsp_Diagnostic *d = &doc->diagnostics[i];
-            String_Const_u8 kind = string_u8_litexpr("info");
-            if (d->severity == 1){
-                kind = string_u8_litexpr("error");
+    for (i32 server = 0; server < LspLanguage_COUNT; server += 1){
+        String_Const_u8 root = (lsp_servers[server].root_count > 0)?lsp_servers[server].roots[0]:string_u8_empty;
+        for (Lsp_Document *doc = lsp_servers[server].first_document; doc != 0; doc = doc->next){
+            for (i32 i = 0; i < doc->diagnostic_count; i += 1){
+                Lsp_Diagnostic *d = &doc->diagnostics[i];
+                String_Const_u8 kind = string_u8_litexpr("info");
+                if (d->severity == 1){
+                    kind = string_u8_litexpr("error");
+                }
+                else if (d->severity == 2){
+                    kind = string_u8_litexpr("warning");
+                }
+                String_Const_u8 item = push_u8_stringf(scratch, "%.*s:%lld: %.*s: %.*s", string_expand(fuzzy_relative_path(root, doc->path)),
+                                                       d->line, string_expand(kind), string_expand(d->message));
+                lister_add_item(lister, item, SCu8(), d, 0);
             }
-            else if (d->severity == 2){
-                kind = string_u8_litexpr("warning");
-            }
-            String_Const_u8 item = push_u8_stringf(scratch, "%.*s:%lld: %.*s: %.*s", string_expand(fuzzy_relative_path(root, doc->path)),
-                                                   d->line, string_expand(kind), string_expand(d->message));
-            lister_add_item(lister, item, SCu8(), d, 0);
         }
     }
     Lister_Result l_result = run_lister(app, lister);
     if (!l_result.canceled){
         Lsp_Diagnostic *d = (Lsp_Diagnostic*)l_result.user_data;
-        for (Lsp_Document *doc = lsp_first_document; doc != 0; doc = doc->next){
-            if (doc->diagnostics <= d && d < doc->diagnostics + doc->diagnostic_count){
-                point_stack_push_view_cursor(app, view);
-                view_set_buffer(app, view, doc->buffer, 0);
-                view_set_cursor_and_preferred_x(app, view, seek_pos(d->range.min));
-                break;
+        for (i32 server = 0; server < LspLanguage_COUNT; server += 1){
+            for (Lsp_Document *doc = lsp_servers[server].first_document; doc != 0; doc = doc->next){
+                if (doc->diagnostics <= d && d < doc->diagnostics + doc->diagnostic_count){
+                    point_stack_push_view_cursor(app, view);
+                    view_set_buffer(app, view, doc->buffer, 0);
+                    view_set_cursor_and_preferred_x(app, view, seek_pos(d->range.min));
+                    break;
+                }
             }
         }
     }
 }
 
 CUSTOM_COMMAND_SIG(lsp_restart)
-CUSTOM_DOC("Stops the Java language server and starts it again for the open Java files.")
+CUSTOM_DOC("Stops the language server of the current file and starts it again for its open files.")
 {
-    if (lsp_connection != 0){
-        lsp_kill(lsp_connection);
+    View_ID view = get_active_view(app, Access_Always);
+    if (!lsp_select_buffer(app, view_get_buffer(app, view, Access_Always))){
+        print_message(app, string_u8_litexpr("lsp: no language server for this file\n"));
+        return;
     }
-    lsp_connection = 0;
-    lsp_initialized = false;
-    lsp_unavailable = false;
+    if (lsp_server->connection != 0){
+        lsp_kill(lsp_server->connection);
+    }
+    lsp_server->connection = 0;
+    lsp_server->initialized = false;
+    lsp_server->unavailable = false;
     lsp_reset_documents();
     lsp_set_status(string_u8_empty);
     lsp_scan_buffers(app);
@@ -2237,7 +2415,7 @@ lsp_completion_on_insert(Application_Links *app, String_Const_u8 text){
     View_ID view = get_active_view(app, Access_ReadVisible);
     Buffer_ID buffer = view_get_buffer(app, view, Access_ReadVisible);
     Lsp_Document *doc = lsp_document_from_buffer(buffer);
-    if (doc == 0 || !lsp_initialized || text.size == 0){
+    if (doc == 0 || !lsp_server->initialized || text.size == 0){
         lsp_completion_close();
         return;
     }
@@ -2285,7 +2463,7 @@ lsp_completion_trigger(Application_Links *app){
     Buffer_ID buffer = view_get_buffer(app, view, Access_ReadVisible);
     Lsp_Document *doc = lsp_document_from_buffer(buffer);
     b32 result = false;
-    if (doc != 0 && lsp_initialized){
+    if (doc != 0 && lsp_server->initialized){
         i64 start = view_get_cursor_pos(app, view);
         for (;start > 0 && lsp_is_identifier_char(buffer_get_char(app, buffer, start - 1)); start -= 1);
         lsp_completion_request(app, view, buffer, doc, start, 0);
@@ -2544,7 +2722,7 @@ CUSTOM_DOC("Shows the signature of the call around the cursor using the language
     View_ID view = 0;
     Buffer_ID buffer = 0;
     Lsp_Document *doc = lsp_active_document(app, &view, &buffer);
-    if (doc != 0 && lsp_initialized){
+    if (doc != 0 && lsp_server->initialized){
         lsp_signature_request(app, view, buffer, doc);
     }
 }
@@ -2954,7 +3132,7 @@ lsp_symbols(Application_Links *app, b32 workspace){
     View_ID view = 0;
     Buffer_ID buffer = 0;
     Lsp_Document *doc = lsp_active_document(app, &view, &buffer);
-    if (doc == 0 && !(workspace && lsp_initialized)){
+    if (doc == 0 && !(workspace && lsp_server->initialized)){
         list_all_functions_current_buffer_lister(app);
         return;
     }
@@ -3231,7 +3409,7 @@ lsp_draw_signature(Application_Links *app, View_ID view_id, Text_Layout_ID text_
 function String_Const_u8
 lsp_status_label(Application_Links *app, Arena *arena, Buffer_ID buffer, b32 with_status){
     String_Const_u8 result = {};
-    if (lsp_connection != 0 && lsp_buffer_is_java(app, buffer)){
+    if (lsp_select_buffer(app, buffer) && lsp_server->connection != 0){
         Lsp_Document *doc = lsp_document_from_buffer(buffer);
         i32 errors = 0;
         i32 warnings = 0;
@@ -3243,16 +3421,18 @@ lsp_status_label(Application_Links *app, Arena *arena, Buffer_ID buffer, b32 wit
                 warnings += 1;
             }
         }
-        String_Const_u8 status = string_prefix(lsp_status, 40);
+        String_Const_u8 status = string_prefix(lsp_server->status, 40);
         if (!with_status){
             status = string_u8_empty;
         }
         String_Const_u8 space = (status.size > 0)?string_u8_litexpr(" "):string_u8_empty;
         if (errors > 0 || warnings > 0){
-            result = push_u8_stringf(arena, " jdtls%.*s%.*s E%d W%d ", string_expand(space), string_expand(status), errors, warnings);
+            result = push_u8_stringf(arena, " %.*s%.*s%.*s E%d W%d ", string_expand(lsp_server_name()),
+                                     string_expand(space), string_expand(status), errors, warnings);
         }
         else{
-            result = push_u8_stringf(arena, " jdtls%.*s%.*s ", string_expand(space), string_expand(status));
+            result = push_u8_stringf(arena, " %.*s%.*s%.*s ", string_expand(lsp_server_name()),
+                                     string_expand(space), string_expand(status));
         }
     }
     return(result);
@@ -3262,7 +3442,10 @@ lsp_status_label(Application_Links *app, Arena *arena, Buffer_ID buffer, b32 wit
 
 function void
 lsp_init(Application_Links *app){
-    lsp_arena = make_arena_system();
+    for (i32 i = 0; i < LspLanguage_COUNT; i += 1){
+        lsp_servers[i].language = i;
+        lsp_servers[i].arena = make_arena_system();
+    }
 }
 
 #endif //FCODER_LSP_CPP

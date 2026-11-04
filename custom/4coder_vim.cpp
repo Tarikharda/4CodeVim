@@ -2351,7 +2351,7 @@ vim_execute_ex(Application_Links *app, View_ID view, Buffer_ID buffer, String_Co
         Scratch_Block scratch(app);
         String_Const_u8 label = lsp_status_label(app, scratch, buffer, true);
         print_message(app, push_u8_stringf(scratch, "lsp:%.*s roots: %d\n",
-                                           string_expand((label.size > 0)?label:string_u8_litexpr(" not running")), lsp_root_count));
+                                           string_expand((label.size > 0)?label:string_u8_litexpr(" not running")), lsp_server->root_count));
     }
     else if (VimEx("LspDiagnostics")){
         lsp_list_diagnostics(app);
@@ -4195,7 +4195,7 @@ vim_render_buffer(Application_Links *app, View_ID view_id, Face_ID face_id,
     // NOTE(allen): Token colorizing
     Token_Array token_array = get_token_array_from_buffer(app, buffer);
     if (token_array.tokens != 0){
-        draw_cpp_token_colors(app, text_layout_id, &token_array);
+        lang_draw_token_colors(app, buffer, text_layout_id, &token_array);
 
         // NOTE(allen): Scan for TODOs and NOTEs
         b32 use_comment_keyword = def_get_config_b32(vars_save_string_lit("use_comment_keyword"));

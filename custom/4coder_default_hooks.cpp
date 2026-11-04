@@ -751,9 +751,14 @@ BUFFER_HOOK_SIG(default_begin_buffer){
                     treat_as_code = true;
                 }
 
-                // NOTE: Java is close enough to C++ that the C++ lexer gives usable
-                // highlighting, auto indentation and code indexing.
-                if (string_match(ext, string_u8_litexpr("java"))){
+                // NOTE: Java, Kotlin and Zig are close enough to C++ that the C++ lexer
+                // gives usable highlighting (keywords fixed up in 4coder_languages.cpp),
+                // auto indentation and code indexing.
+                if (string_match(ext, string_u8_litexpr("java")) ||
+                    string_match(ext, string_u8_litexpr("kt")) ||
+                    string_match(ext, string_u8_litexpr("kts")) ||
+                    string_match(ext, string_u8_litexpr("zig")) ||
+                    string_match(ext, string_u8_litexpr("zon"))){
                     treat_as_code = true;
                 }
 

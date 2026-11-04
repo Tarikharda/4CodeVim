@@ -17,6 +17,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <string.h>
 #endif
@@ -27,6 +28,7 @@
 #include "4coder_lsp.cpp"
 #include "4coder_git.cpp"
 #include "4coder_junit.cpp"
+#include "4coder_languages.cpp"
 #include "4coder_vim_keys.cpp"
 #include "4coder_vim.cpp"
 
