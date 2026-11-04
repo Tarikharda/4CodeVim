@@ -124,7 +124,7 @@ fuzzy_find_file_in(Application_Links *app, String_Const_u8 root){
     String_Const_u8 *paths = push_array(scratch, String_Const_u8, lines.node_count);
 
     Lister_Block lister(app, scratch);
-    lister_set_query(lister, push_u8_stringf(scratch, "Files in %.*s:", string_expand(root)));
+    lister_set_query(lister, push_u8_stringf(scratch, "Files in %.*s:", string_expand(string_front_of_path(root))));
     lister_set_default_handlers(lister);
     ((Lister*)lister)->fuzzy_filter = true;
     i32 count = 0;
@@ -228,7 +228,8 @@ fuzzy_grep_query(Application_Links *app, String_Const_u8 root, String_Const_u8 i
     Query_Bar_Group group(app);
     u8 space[256];
     Query_Bar bar = {};
-    bar.prompt = push_u8_stringf(scratch, "rg in %.*s: ", string_expand(root));
+    // NOTE: Only the project folder's name, so the pattern stays visible in narrow panels.
+    bar.prompt = push_u8_stringf(scratch, "rg in %.*s: ", string_expand(string_front_of_path(root)));
     bar.string = SCu8(space, (u64)0);
     bar.string_capacity = sizeof(space);
     if (query_user_general(app, &bar, false, init)){
@@ -262,6 +263,20 @@ CUSTOM_DOC("Lists the files under the current file's folder with fzf style filte
 {
     Scratch_Block scratch(app);
     fuzzy_find_file_in(app, fuzzy_file_dir(app, scratch));
+}
+
+// NOTE: Escapes regex characters so rg searches for the text literally.
+function String_Const_u8
+fuzzy_regex_escape(Arena *arena, String_Const_u8 text){
+    String_u8 result = string_u8_push(arena, text.size*2);
+    for (u64 i = 0; i < text.size; i += 1){
+        u8 c = text.str[i];
+        if (string_find_first(string_u8_litexpr("\\.^$|?*+()[]{}"), c) < 15){
+            string_append_character(&result, '\\');
+        }
+        string_append_character(&result, c);
+    }
+    return(result.string);
 }
 
 CUSTOM_UI_COMMAND_SIG(fuzzy_grep_identifier)

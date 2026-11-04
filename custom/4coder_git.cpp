@@ -702,7 +702,7 @@ CUSTOM_DOC("Lists the changed and untracked files of the repository with fzf sty
     }
     String_Const_u8 *paths = push_array(scratch, String_Const_u8, lines.node_count);
     Lister_Block lister(app, scratch);
-    lister_set_query(lister, push_u8_stringf(scratch, "git status %.*s:", string_expand(root)));
+    lister_set_query(lister, push_u8_stringf(scratch, "git status %.*s:", string_expand(string_front_of_path(root))));
     lister_set_default_handlers(lister);
     ((Lister*)lister)->fuzzy_filter = true;
     i32 count = 0;
@@ -787,61 +787,64 @@ CUSTOM_DOC("Shows who last changed the cursor line, when and why, in a popup.")
     lsp_show_popup(app, view, message);
 }
 
-// NOTE(git): Runs a terminal program in a new kitty window in dir (empty program: a shell).
+// NOTE(git): Runs a terminal program in a new Ghostty window in dir (empty program: a shell).
+// Single instance mode is turned off so the window gets this directory and program even when
+// another Ghostty is already running.
 function void
-git_spawn_kitty(Application_Links *app, String_Const_u8 dir, String_Const_u8 program){
+git_spawn_terminal(Application_Links *app, String_Const_u8 dir, String_Const_u8 program){
     Scratch_Block scratch(app);
     String_Const_u8 dir_q = fuzzy_shell_quote(scratch, dir);
-    String_Const_u8 command = push_u8_stringf(scratch, "(cd %.*s && setsid kitty --directory %.*s %.*s > /dev/null 2>&1 &)",
-                                              string_expand(dir_q), string_expand(dir_q), string_expand(program));
+    String_Const_u8 command = push_u8_stringf(scratch, "(cd %.*s && setsid ghostty --gtk-single-instance=false --working-directory=%.*s%s%.*s > /dev/null 2>&1 &)",
+                                              string_expand(dir_q), string_expand(dir_q),
+                                              (program.size > 0)?" -e ":"", string_expand(program));
     if (system((char*)command.str) != 0){
-        print_message(app, string_u8_litexpr("git: could not start kitty\n"));
+        print_message(app, string_u8_litexpr("git: could not start ghostty\n"));
     }
 }
 
 CUSTOM_COMMAND_SIG(git_lazygit)
-CUSTOM_DOC("Opens lazygit for the current repository in a new kitty window.")
+CUSTOM_DOC("Opens lazygit for the current repository in a new Ghostty window.")
 {
     Scratch_Block scratch(app);
-    git_spawn_kitty(app, fuzzy_search_root(app, scratch), string_u8_litexpr("lazygit"));
+    git_spawn_terminal(app, fuzzy_search_root(app, scratch), string_u8_litexpr("lazygit"));
 }
 
 CUSTOM_COMMAND_SIG(git_lazygit_log)
-CUSTOM_DOC("Opens the lazygit log of the current repository in a new kitty window.")
+CUSTOM_DOC("Opens the lazygit log of the current repository in a new Ghostty window.")
 {
     Scratch_Block scratch(app);
-    git_spawn_kitty(app, fuzzy_search_root(app, scratch), string_u8_litexpr("lazygit log"));
+    git_spawn_terminal(app, fuzzy_search_root(app, scratch), string_u8_litexpr("lazygit log"));
 }
 
 CUSTOM_COMMAND_SIG(git_lazygit_log_cwd)
-CUSTOM_DOC("Opens the lazygit log of the working directory in a new kitty window.")
+CUSTOM_DOC("Opens the lazygit log of the working directory in a new Ghostty window.")
 {
     Scratch_Block scratch(app);
-    git_spawn_kitty(app, system_get_path(scratch, SystemPath_CurrentDirectory), string_u8_litexpr("lazygit log"));
+    git_spawn_terminal(app, system_get_path(scratch, SystemPath_CurrentDirectory), string_u8_litexpr("lazygit log"));
 }
 
 CUSTOM_COMMAND_SIG(git_lazygit_file)
-CUSTOM_DOC("Opens lazygit with the history of the current file in a new kitty window.")
+CUSTOM_DOC("Opens lazygit with the history of the current file in a new Ghostty window.")
 {
     Scratch_Block scratch(app);
     View_ID view = get_active_view(app, Access_Always);
     String_Const_u8 file_name = push_buffer_file_name(app, scratch, view_get_buffer(app, view, Access_Always));
-    git_spawn_kitty(app, fuzzy_search_root(app, scratch),
+    git_spawn_terminal(app, fuzzy_search_root(app, scratch),
                     push_u8_stringf(scratch, "lazygit -f %.*s", string_expand(fuzzy_shell_quote(scratch, file_name))));
 }
 
 CUSTOM_COMMAND_SIG(open_terminal_root)
-CUSTOM_DOC("Opens a kitty terminal in the current repository (or the working directory).")
+CUSTOM_DOC("Opens a Ghostty terminal in the current repository (or the working directory).")
 {
     Scratch_Block scratch(app);
-    git_spawn_kitty(app, fuzzy_search_root(app, scratch), string_u8_empty);
+    git_spawn_terminal(app, fuzzy_search_root(app, scratch), string_u8_empty);
 }
 
 CUSTOM_COMMAND_SIG(open_terminal_cwd)
-CUSTOM_DOC("Opens a kitty terminal in 4coder's working directory.")
+CUSTOM_DOC("Opens a Ghostty terminal in 4coder's working directory.")
 {
     Scratch_Block scratch(app);
-    git_spawn_kitty(app, system_get_path(scratch, SystemPath_CurrentDirectory), string_u8_empty);
+    git_spawn_terminal(app, system_get_path(scratch, SystemPath_CurrentDirectory), string_u8_empty);
 }
 
 #endif //FCODER_GIT_CPP

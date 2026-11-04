@@ -716,6 +716,9 @@ vim_search_prompt(Application_Links *app, View_ID view, Buffer_ID buffer, b32 ba
                     bar.string = backspace_utf8(bar.string);
                     changed = true;
                 }
+                else if (query_bar_edit_key(&bar, &in.event)){
+                    changed = true;
+                }
                 else{
                     leave_current_input_unhandled(app);
                 }
@@ -730,8 +733,11 @@ vim_search_prompt(Application_Links *app, View_ID view, Buffer_ID buffer, b32 ba
                 }
             }
             if (changed){
-                i64 match = vim_search_needle(app, buffer, origin, backward, bar.string, false,
+                i64 match = -1;
+                if (bar.string.size > 0){
+                    match = vim_search_needle(app, buffer, origin, backward, bar.string, false,
                                               vim_pattern_ignores_case(bar.string, false));
+                }
                 if (match >= 0){
                     view_set_cursor(app, view, seek_pos(match));
                     view_set_highlight_range(app, view, Ii64_size(match, bar.string.size));
@@ -2343,7 +2349,7 @@ vim_execute_ex(Application_Links *app, View_ID view, Buffer_ID buffer, String_Co
     }
     else if (VimEx("LspInfo")){
         Scratch_Block scratch(app);
-        String_Const_u8 label = lsp_status_label(app, scratch, buffer);
+        String_Const_u8 label = lsp_status_label(app, scratch, buffer, true);
         print_message(app, push_u8_stringf(scratch, "lsp:%.*s roots: %d\n",
                                            string_expand((label.size > 0)?label:string_u8_litexpr(" not running")), lsp_root_count));
     }
@@ -2367,6 +2373,20 @@ vim_execute_ex(Application_Links *app, View_ID view, Buffer_ID buffer, String_Co
     }
     else if (VimEx("make") || VimEx("mak")){
         build_in_build_panel(app);
+    }
+    else if (VimEx("Test")){
+        Scratch_Block scratch(app);
+        List_String_Const_u8 names = {};
+        List_String_Const_u8 words = string_split(scratch, arg, (u8*)" \t", 2);
+        for (Node_String_Const_u8 *node = words.first; node != 0; node = node->next){
+            if (node->string.size > 0){
+                string_list_push(scratch, &names, node->string);
+            }
+        }
+        junit_test(app, names);
+    }
+    else if (VimEx("TestAll")){
+        junit_test_all(app);
     }
     else if (VimEx("cn") || VimEx("cnext")){
         goto_next_jump(app);
@@ -2477,7 +2497,7 @@ vim_leader(Application_Links *app){
                     case 'a': lsp_code_actions(app); break;
                     case 'r': lsp_rename(app); break;
                     case 'f': lsp_format(app); break;
-                    case 'l': print_message(app, string_u8_litexpr("vim: code lens is not supported yet\n")); break;
+                    case 'l': lsp_code_lens(app); break;
                 }
             }
         }break;
@@ -2529,8 +2549,18 @@ vim_leader(Application_Links *app){
         
         case 't':
         {
-            vim_read_char(app, &c2);
-            print_message(app, string_u8_litexpr("vim: the test runner keys are not supported yet\n"));
+            if (vim_read_char(app, &c2)){
+                switch (c2){
+                    case 'r': junit_test_nearest(app); break;
+                    case 't': junit_test_class_command(app); break;
+                    case 'T': junit_test_module(app); break;
+                    case 's': junit_test_pick(app); break;
+                    case 'l': junit_test_last(app); break;
+                    case 'f': junit_test_failed(app); break;
+                    case 'o': junit_toggle_panel(app); break;
+                    case 'x': junit_stop(app); break;
+                }
+            }
         }break;
     }
 }
@@ -3070,6 +3100,31 @@ vim_visual(Application_Links *app, View_ID view, Buffer_ID buffer, u8 c, i32 cou
         {
             vim_set_mode(app, view, VimMode_Normal);
             vim_ex_command(app, view, buffer, string_u8_litexpr("'<,'>"));
+        }break;
+
+        // NOTE(vim): The vimrc's visual leader maps: <leader>ca code actions and <leader>cf
+        // format for the selected lines, <leader>sr greps the selection (CtrlSFVwordPath:
+        // literal, in a prompt so a path can be added).
+        case ' ':
+        {
+            Range_i64 lines = vim_visual_line_range(app, view, buffer);
+            Scratch_Block scratch(app);
+            String_Const_u8 selection = push_buffer_range(app, scratch, buffer, vim_visual_char_range(app, view, buffer));
+            u8 c2 = 0;
+            u8 c3 = 0;
+            if (vim_read_char(app, &c2) && vim_read_char(app, &c3)){
+                vim_set_mode(app, view, VimMode_Normal);
+                if (c2 == 'c' && c3 == 'a'){
+                    lsp_code_action_lines(app, 0, false, lines);
+                }
+                else if (c2 == 'c' && c3 == 'f'){
+                    lsp_format_lines(app, lines);
+                }
+                else if (c2 == 's' && c3 == 'r'){
+                    selection = string_prefix(selection, string_find_first(selection, '\n'));
+                    fuzzy_grep_query(app, fuzzy_search_root(app, scratch), fuzzy_regex_escape(scratch, selection));
+                }
+            }
         }break;
 
         default:
@@ -3681,39 +3736,6 @@ vim_mode_label(void){
     return(result);
 }
 
-// NOTE(vim): Draws the mode and language server labels at the right of the bar and returns
-// where they start.
-function f32
-vim_draw_mode_label(Application_Links *app, Face_ID face_id, Buffer_ID buffer, Rect_f32 bar){
-    Scratch_Block scratch(app);
-    String_Const_u8 label = vim_mode_label();
-    if (vim_macro_recording != 0){
-        label = push_u8_stringf(scratch, " REC @%c %.*s", vim_macro_recording, string_expand(label));
-    }
-    f32 width = get_string_advance(app, face_id, label);
-    Rect_f32 box = Rf32(bar.x1 - width, bar.y0, bar.x1, bar.y1);
-
-    // NOTE(vim): Language server status and error/warning counts, left of the mode.
-    f32 x = box.x0;
-    String_Const_u8 lsp_label = lsp_status_label(app, scratch, buffer);
-    if (lsp_label.size > 0){
-        f32 label_width = get_string_advance(app, face_id, lsp_label);
-        Rect_f32 label_box = Rf32(x - label_width, bar.y0, x, bar.y1);
-        draw_rectangle_fcolor(app, label_box, 0.f, fcolor_id(defcolor_margin_active));
-        draw_string(app, face_id, lsp_label, V2f32(label_box.x0, label_box.y0 + 2.f), fcolor_resolve(fcolor_id(defcolor_base)));
-        x = label_box.x0;
-    }
-
-    FColor back = fcolor_id(defcolor_keyword);
-    switch (vim_mode){
-        case VimMode_Insert: case VimMode_Replace: {back = fcolor_id(defcolor_str_constant);}break;
-        case VimMode_Visual: case VimMode_VisualLine: {back = fcolor_id(defcolor_pop2);}break;
-    }
-    draw_rectangle_fcolor(app, box, 0.f, back);
-    draw_string(app, face_id, label, V2f32(box.x0, box.y0 + 2.f), fcolor_resolve(fcolor_id(defcolor_back)));
-    return(x);
-}
-
 // NOTE(vim): Visual mode selection size, as the vimrc's status line shows it:
 // "3 lines  120 chars (98 no spaces)"; line breaks are not counted.
 function String_Const_u8
@@ -3744,18 +3766,54 @@ vim_selection_label(Application_Links *app, Arena *arena, View_ID view, Buffer_I
             }
         }
         if (lines > 1){
-            result = push_u8_stringf(arena, "%lld lines  %lld chars (%lld no spaces)   ", lines, chars, no_spaces);
+            result = push_u8_stringf(arena, "%lld lines  %lld chars (%lld no spaces)", lines, chars, no_spaces);
         }
         else{
-            result = push_u8_stringf(arena, "%lld chars (%lld no spaces)   ", chars, no_spaces);
+            result = push_u8_stringf(arena, "%lld chars (%lld no spaces)", chars, no_spaces);
         }
     }
     return(result);
 }
 
-// NOTE(vim): The file bar follows the vimrc's status line: modified flag, path from the git
-// root, Git:branch with colored +added ~changed -removed counts on the left; selection
-// size, line:column and file type on the right, before the mode label.
+// NOTE(vim): Like vim's pathshorten(): every folder but the file name is cut to its first
+// letter (two for dot folders), "src/main/java/Main.java" -> "s/m/j/Main.java".
+function String_Const_u8
+vim_shorten_path(Arena *arena, String_Const_u8 path){
+    List_String_Const_u8 list = {};
+    u64 start = 0;
+    for (u64 i = 0; i <= path.size; i += 1){
+        if (i == path.size || path.str[i] == '/'){
+            String_Const_u8 part = SCu8(path.str + start, i - start);
+            if (i < path.size && part.size > 0){
+                part = string_prefix(part, (part.str[0] == '.')?2:1);
+            }
+            string_list_push(arena, &list, part);
+            start = i + 1;
+        }
+    }
+    return(string_list_flatten(arena, list, 0, string_u8_litexpr("/"), StringSeparator_NoFlags, StringFill_NoTerminate));
+}
+
+// NOTE(vim): Pieces of the file bar that are dropped one by one, in this order, until the
+// bar fits its panel: a narrow panel keeps the file name, position and mode readable
+// instead of drawing the left and right halves over each other.
+typedef i32 Vim_Bar_Drop;
+enum{
+    VimBarDrop_Selection,
+    VimBarDrop_FileType,
+    VimBarDrop_LspStatus,
+    VimBarDrop_LongPath,
+    VimBarDrop_Branch,
+    VimBarDrop_ShortPath,
+    VimBarDrop_GitCounts,
+    VimBarDrop_Lsp,
+    VimBarDrop_LongMode,
+    VimBarDrop_COUNT,
+};
+
+// NOTE(vim): The file bar follows the vimrc's status line: modified flag, file (path from
+// the git root when there is room), Git:branch with colored +added ~changed -removed counts
+// on the left; selection size, line:column, file type, jdtls and the mode on the right.
 function void
 vim_draw_file_bar(Application_Links *app, View_ID view_id, Buffer_ID buffer, Face_ID face_id, Rect_f32 bar, b32 is_active){
     Scratch_Block scratch(app);
@@ -3772,53 +3830,163 @@ vim_draw_file_bar(Application_Links *app, View_ID view_id, Buffer_ID buffer, Fac
         flag = string_u8_litexpr("%%");
     }
 
+    // NOTE(vim): Never an absolute path: the folders shown are the ones below the git root.
     Git_Buffer *git = git_buffer_state(buffer);
-    String_Const_u8 path = push_buffer_file_name(app, scratch, buffer);
-    if (git != 0 && git->root.size > 0){
-        path = git->path;
-    }
-    else if (path.size > 0){
-        char *home = getenv("HOME");
-        String_Const_u8 home_string = SCu8(home);
-        if (home != 0 && string_match(string_prefix(path, home_string.size), home_string)){
-            path = push_u8_stringf(scratch, "~%.*s", string_expand(string_skip(path, home_string.size)));
+    String_Const_u8 file_name = push_buffer_file_name(app, scratch, buffer);
+    String_Const_u8 name = {};
+    String_Const_u8 long_dir = {};
+    if (file_name.size > 0){
+        name = string_front_of_path(file_name);
+        if (git != 0 && git->root.size > 0){
+            long_dir = string_chop(git->path, string_front_of_path(git->path).size);
         }
     }
     else{
-        path = push_buffer_unique_name(app, scratch, buffer);
+        name = push_buffer_unique_name(app, scratch, buffer);
+    }
+    String_Const_u8 short_dir = vim_shorten_path(scratch, long_dir);
+
+    String_Const_u8 branch = {};
+    i64 counts[3] = {};
+    b32 has_counts = false;
+    if (git != 0 && git->tracked && git->branch.size > 0){
+        branch = push_u8_stringf(scratch, "   Git:%.*s", string_expand(git->branch));
+        counts[0] = git->added;
+        counts[1] = git->modified;
+        counts[2] = git->removed;
+        has_counts = (counts[0] > 0 || counts[1] > 0 || counts[2] > 0);
+    }
+    char signs[3] = {'+', '~', '-'};
+    String_Const_u8 count_strings[3] = {};
+    String_Const_u8 counts_text = {};
+    for (i32 i = 0; i < 3; i += 1){
+        if (counts[i] > 0){
+            count_strings[i] = push_u8_stringf(scratch, " %c%lld", signs[i], counts[i]);
+            counts_text = push_u8_stringf(scratch, "%.*s%.*s", string_expand(counts_text), string_expand(count_strings[i]));
+        }
     }
 
+    String_Const_u8 selection = {};
+    String_Const_u8 mode = {};
+    String_Const_u8 short_mode = {};
+    String_Const_u8 lsp_long = {};
+    String_Const_u8 lsp_short = {};
+    if (is_active){
+        selection = vim_selection_label(app, scratch, view_id, buffer);
+        mode = vim_mode_label();
+        short_mode = push_u8_stringf(scratch, " %c ", mode.str[1]);
+        if (vim_macro_recording != 0){
+            mode = push_u8_stringf(scratch, " REC @%c %.*s", vim_macro_recording, string_expand(mode));
+            short_mode = push_u8_stringf(scratch, " @%c%.*s", vim_macro_recording, string_expand(short_mode));
+        }
+        lsp_long = lsp_status_label(app, scratch, buffer, true);
+        lsp_short = lsp_status_label(app, scratch, buffer, false);
+    }
+    Buffer_Cursor cursor = view_compute_cursor(app, view_id, seek_pos(view_get_cursor_pos(app, view_id)));
+    String_Const_u8 position = push_u8_stringf(scratch, "%lld:%lld", cursor.line, cursor.col);
+    String_Const_u8 file_type = string_file_extension(file_name);
+    if (file_type.size > 0){
+        file_type = push_u8_stringf(scratch, "   %.*s", string_expand(file_type));
+    }
+
+    // NOTE(vim): Drop pieces until the left and right halves fit with a two column gap.
+    String_Const_u8 sep = string_u8_litexpr("   ");
+    f32 avail = rect_width(bar) - 4.f;
+    b32 dropped[VimBarDrop_COUNT] = {};
+    String_Const_u8 left_head = {};
+    String_Const_u8 left_git = {};
+    String_Const_u8 info = {};
+    String_Const_u8 lsp = {};
+    String_Const_u8 mode_text = {};
+    b32 show_branch = false;
+    b32 show_counts = false;
+    for (i32 step = 0;; step += 1){
+        String_Const_u8 dir = long_dir;
+        if (dropped[VimBarDrop_LongPath]){
+            dir = short_dir;
+        }
+        if (dropped[VimBarDrop_ShortPath]){
+            dir = string_u8_empty;
+        }
+        left_head = push_u8_stringf(scratch, " %.*s %.*s%.*s", string_expand(flag), string_expand(dir), string_expand(name));
+        show_branch = (!dropped[VimBarDrop_Branch] && branch.size > 0);
+        show_counts = (!dropped[VimBarDrop_GitCounts] && has_counts);
+        left_git = push_u8_stringf(scratch, "%.*s%s%.*s",
+                                   string_expand(show_branch?branch:string_u8_empty),
+                                   (show_counts && !show_branch)?"  ":"",
+                                   string_expand(show_counts?counts_text:string_u8_empty));
+        String_Const_u8 sel = dropped[VimBarDrop_Selection]?string_u8_empty:selection;
+        info = push_u8_stringf(scratch, "%.*s%.*s%.*s%.*s ",
+                               string_expand(sel), string_expand((sel.size > 0)?sep:string_u8_empty),
+                               string_expand(position),
+                               string_expand(dropped[VimBarDrop_FileType]?string_u8_empty:file_type));
+        lsp = dropped[VimBarDrop_LspStatus]?lsp_short:lsp_long;
+        if (dropped[VimBarDrop_Lsp]){
+            lsp = string_u8_empty;
+        }
+        mode_text = dropped[VimBarDrop_LongMode]?short_mode:mode;
+        f32 width = (get_string_advance(app, face_id, left_head) + get_string_advance(app, face_id, left_git) +
+                     get_string_advance(app, face_id, string_u8_litexpr("  ")) +
+                     get_string_advance(app, face_id, info) + get_string_advance(app, face_id, lsp) +
+                     get_string_advance(app, face_id, mode_text));
+        if (width <= avail || step >= VimBarDrop_COUNT){
+            break;
+        }
+        dropped[step] = true;
+    }
+
+    // NOTE(vim): Whatever still does not fit is clipped to the bar.
+    Rect_f32 prev_clip = draw_set_clip(app, bar);
+    f32 right = bar.x1;
+    if (mode_text.size > 0){
+        f32 width = get_string_advance(app, face_id, mode_text);
+        Rect_f32 box = Rf32(right - width, bar.y0, right, bar.y1);
+        FColor back = fcolor_id(defcolor_keyword);
+        switch (vim_mode){
+            case VimMode_Insert: case VimMode_Replace: {back = fcolor_id(defcolor_str_constant);}break;
+            case VimMode_Visual: case VimMode_VisualLine: {back = fcolor_id(defcolor_pop2);}break;
+        }
+        draw_rectangle_fcolor(app, box, 0.f, back);
+        draw_string(app, face_id, mode_text, V2f32(box.x0, box.y0 + 2.f), fcolor_resolve(fcolor_id(defcolor_back)));
+        right = box.x0;
+    }
+    if (lsp.size > 0){
+        f32 width = get_string_advance(app, face_id, lsp);
+        Rect_f32 box = Rf32(right - width, bar.y0, right, bar.y1);
+        draw_rectangle_fcolor(app, box, 0.f, fcolor_id(defcolor_margin_active));
+        draw_string(app, face_id, lsp, V2f32(box.x0, box.y0 + 2.f), fcolor_resolve(base));
+        right = box.x0;
+    }
+    f32 info_width = get_string_advance(app, face_id, info);
+    draw_string(app, face_id, info, V2f32(right - info_width, bar.y0 + 2.f), fcolor_resolve(base));
+    right -= info_width;
+
+    // NOTE(vim): The left half never runs into the right half.
+    f32 gap = get_string_advance(app, face_id, string_u8_litexpr(" "));
+    draw_set_clip(app, Rf32(bar.x0, bar.y0, clamp_bot(bar.x0, right - gap), bar.y1));
     Fancy_Line line = {};
-    push_fancy_stringf(scratch, &line, base, " %.*s %.*s", string_expand(flag), string_expand(path));
-    if (git != 0 && git->tracked && git->branch.size > 0){
-        push_fancy_stringf(scratch, &line, base, "   Git:%.*s", string_expand(git->branch));
-        i64 counts[3] = {git->added, git->modified, git->removed};
-        char signs[3] = {'+', '~', '-'};
+    push_fancy_string(scratch, &line, base, left_head);
+    if (show_branch){
+        push_fancy_string(scratch, &line, base, branch);
+    }
+    if (show_counts){
+        if (!show_branch){
+            push_fancy_string(scratch, &line, base, string_u8_litexpr("  "));
+        }
         Managed_ID ids[3] = {defcolor_git_bar_added, defcolor_git_bar_modified, defcolor_git_bar_removed};
         ARGB_Color fallbacks[3] = {0xFF73BD79, 0xFF70AEFF, 0xFFF75464};
         for (i32 i = 0; i < 3; i += 1){
-            if (counts[i] > 0){
+            if (count_strings[i].size > 0){
                 FColor color = base;
                 if (is_active){
                     color = fcolor_argb(git_theme_color(ids[i], fallbacks[i]));
                 }
-                push_fancy_stringf(scratch, &line, color, " %c%lld", signs[i], counts[i]);
+                push_fancy_string(scratch, &line, color, count_strings[i]);
             }
         }
     }
     draw_fancy_line(app, face_id, fcolor_zero(), &line, bar.p0 + V2f32(2.f, 2.f));
-
-    f32 right = bar.x1;
-    if (is_active){
-        right = vim_draw_mode_label(app, face_id, buffer, bar);
-    }
-    Buffer_Cursor cursor = view_compute_cursor(app, view_id, seek_pos(view_get_cursor_pos(app, view_id)));
-    String_Const_u8 file_type = string_file_extension(push_buffer_file_name(app, scratch, buffer));
-    String_Const_u8 info = push_u8_stringf(scratch, "%.*s%lld:%lld%s%.*s ",
-                                           string_expand(is_active?vim_selection_label(app, scratch, view_id, buffer):string_u8_empty),
-                                           cursor.line, cursor.col, (file_type.size > 0)?"   ":"", string_expand(file_type));
-    f32 width = get_string_advance(app, face_id, info);
-    draw_string(app, face_id, info, V2f32(right - width, bar.y0 + 2.f), fcolor_resolve(base));
+    draw_set_clip(app, prev_clip);
 }
 
 function void

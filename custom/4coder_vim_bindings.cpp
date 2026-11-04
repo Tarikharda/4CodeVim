@@ -24,18 +24,20 @@
 #include "4coder_fuzzy_search.cpp"
 #include "4coder_lsp.cpp"
 #include "4coder_git.cpp"
+#include "4coder_junit.cpp"
 #include "4coder_vim.cpp"
 
 #if !defined(META_PASS)
 #include "generated/managed_id_metadata.cpp"
 #endif
 
-// NOTE: Per frame work of the language server client and the git signs.
+// NOTE: Per frame work of the language server client, the git signs and the test runner.
 function void
 vim_tick(Application_Links *app, Frame_Info frame_info){
     default_tick(app, frame_info);
     lsp_update(app);
     git_update(app);
+    junit_update(app);
     vim_apply_scrolloff(app);
 }
 

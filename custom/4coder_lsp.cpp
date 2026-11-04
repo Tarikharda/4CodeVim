@@ -862,6 +862,9 @@ lsp_java_settings(Application_Links *app, Arena *arena){
     List_String_Const_u8 parts = {};
     // NOTE(lsp): jdtls keeps signature help off unless the client turns it on.
     string_list_push(arena, &parts, string_u8_litexpr("\"signatureHelp\":{\"enabled\":true,\"description\":{\"enabled\":true}}"));
+    // NOTE(lsp): The "N references" / "N implementations" lenses behind <leader>cl.
+    string_list_push(arena, &parts, string_u8_litexpr("\"referencesCodeLens\":{\"enabled\":true}"));
+    string_list_push(arena, &parts, string_u8_litexpr("\"implementationsCodeLens\":{\"enabled\":true}"));
     String_Const_u8 user_name = def_get_config_string(arena, vars_save_string_lit("user_name"));
     if (user_name.size > 0 && !string_match(user_name, string_u8_litexpr("not-set"))){
         string_list_pushf(arena, &parts, "\"templates\":{\"typeComment\":[\"/**\",\" * ${tags}\",\" * @author %.*s\",\" */\"]}",
@@ -956,6 +959,8 @@ lsp_start_java(Application_Links *app, String_Const_u8 root){
                                              "\"references\":{},"
                                              "\"rename\":{},"
                                              "\"formatting\":{},"
+                                             "\"rangeFormatting\":{},"
+                                             "\"codeLens\":{},"
                                              "\"documentSymbol\":{\"hierarchicalDocumentSymbolSupport\":true},"
                                              "\"codeAction\":{\"codeActionLiteralSupport\":{\"codeActionKind\":{\"valueSet\":"
                                              "[\"quickfix\",\"refactor\",\"refactor.extract\",\"refactor.inline\",\"refactor.rewrite\","
@@ -1535,13 +1540,15 @@ lsp_show_popup(Application_Links *app, View_ID view, String_Const_u8 text){
     }
     linalloc_clear(&lsp_hover_arena);
 
-    // NOTE(lsp): Drop markdown code fences and runs of blank lines.
+    // NOTE(lsp): Drop markdown code fences, the "<!-- -->" separators jdtls puts between
+    // list items, and runs of blank lines.
     List_String_Const_u8 lines = string_split(&lsp_hover_arena, text, (u8*)"\n", 1);
     List_String_Const_u8 kept = {};
     b32 prev_blank = true;
     for (Node_String_Const_u8 *node = lines.first; node != 0; node = node->next){
         String_Const_u8 line = string_chop_whitespace(node->string);
-        if (string_match(string_prefix(line, 3), string_u8_litexpr("```"))){
+        if (string_match(string_prefix(line, 3), string_u8_litexpr("```")) ||
+            string_match(string_skip_whitespace(line), string_u8_litexpr("<!-- -->"))){
             continue;
         }
         line = lsp_strip_markdown(&lsp_hover_arena, line);
@@ -2637,8 +2644,11 @@ CUSTOM_DOC("Renames the symbol under the cursor everywhere using the language se
                                              string_expand(json_escape(scratch, bar.string)));
     Json_Value *result = lsp_request(app, scratch, "textDocument/rename", params);
     if (result != 0 && result->kind == JsonKind_Object){
-        i32 count = lsp_apply_workspace_edit(app, result);
-        print_message(app, push_u8_stringf(scratch, "lsp: renamed %d occurrences\n", count));
+        // NOTE(lsp): jdtls may cover several occurrences with one edit, so count files.
+        lsp_apply_workspace_edit(app, result);
+        i32 files = json_get(result, "changes")->count + json_get(result, "documentChanges")->count;
+        print_message(app, push_u8_stringf(scratch, "lsp: renamed to %.*s in %d file%s\n",
+                                           string_expand(bar.string), files, (files == 1)?"":"s"));
     }
 }
 
@@ -2678,10 +2688,10 @@ lsp_run_code_action(Application_Links *app, Arena *arena, Json_Value *action){
     }
 }
 
-// NOTE(lsp): Quick fixes and refactorings for the cursor line. only limits the kind, e.g.
-// "source" or "source.organizeImports"; apply_first skips the list.
+// NOTE(lsp): Quick fixes and refactorings for lines (1 based, the cursor line when empty).
+// only limits the kind, e.g. "source" or "source.organizeImports"; apply_first skips the list.
 function void
-lsp_code_action(Application_Links *app, char *only, b32 apply_first){
+lsp_code_action_lines(Application_Links *app, char *only, b32 apply_first, Range_i64 lines){
     View_ID view = 0;
     Buffer_ID buffer = 0;
     Lsp_Document *doc = lsp_active_document(app, &view, &buffer);
@@ -2689,14 +2699,17 @@ lsp_code_action(Application_Links *app, char *only, b32 apply_first){
         return;
     }
     Scratch_Block scratch(app);
-    i64 pos = view_get_cursor_pos(app, view);
-    i64 line = get_line_number_from_pos(app, buffer, pos);
+    if (lines.min <= 0){
+        i64 line = get_line_number_from_pos(app, buffer, view_get_cursor_pos(app, view));
+        lines = Ii64(line, line);
+    }
+    i64 line_index = lines.min - 1;
+    i64 last_index = 0;
     i64 line_end_char = 0;
-    i64 line_index = 0;
-    lsp_position_from_pos(app, buffer, get_line_end_pos(app, buffer, line), &line_index, &line_end_char);
+    lsp_position_from_pos(app, buffer, get_line_end_pos(app, buffer, lines.max), &last_index, &line_end_char);
     List_String_Const_u8 diagnostics = {};
     for (i32 i = 0; i < doc->diagnostic_count; i += 1){
-        if (doc->diagnostics[i].line == line){
+        if (lines.min <= doc->diagnostics[i].line && doc->diagnostics[i].line <= lines.max){
             string_list_push(scratch, &diagnostics, doc->diagnostics[i].raw);
         }
     }
@@ -2708,7 +2721,7 @@ lsp_code_action(Application_Links *app, char *only, b32 apply_first){
                                              "{\"textDocument\":{\"uri\":\"%.*s\"},"
                                              "\"range\":{\"start\":{\"line\":%lld,\"character\":0},\"end\":{\"line\":%lld,\"character\":%lld}},"
                                              "\"context\":{\"diagnostics\":[%.*s]%.*s}}",
-                                             string_expand(json_escape(scratch, doc->uri)), line_index, line_index, line_end_char,
+                                             string_expand(json_escape(scratch, doc->uri)), line_index, last_index, line_end_char,
                                              string_expand(string_list_flatten(scratch, diagnostics, 0, string_u8_litexpr(","), 0, StringFill_NoTerminate)),
                                              string_expand(only_part));
     Json_Value *result = lsp_request(app, scratch, "textDocument/codeAction", params);
@@ -2737,6 +2750,96 @@ lsp_code_action(Application_Links *app, char *only, b32 apply_first){
     }
 }
 
+function void
+lsp_code_action(Application_Links *app, char *only, b32 apply_first){
+    lsp_code_action_lines(app, only, apply_first, Ii64(0, 0));
+}
+
+// NOTE(lsp): jdtls's lenses run client side commands that show a list of locations
+// (arguments: uri, position, locations); anything else goes back to the server.
+function void
+lsp_run_code_lens_command(Application_Links *app, Arena *arena, View_ID view, Json_Value *command){
+    String_Const_u8 name = json_get(command, "command")->string;
+    if (string_match(name, string_u8_litexpr("java.show.references")) ||
+        string_match(name, string_u8_litexpr("java.show.implementations"))){
+        Json_Value *list = json_get(command, "arguments")->first;
+        for (i32 i = 0; i < 2 && list != 0; i += 1){
+            list = list->next;
+        }
+        if (list == 0 || list->kind != JsonKind_Array || list->count == 0){
+            print_message(app, string_u8_litexpr("lsp: no locations\n"));
+            return;
+        }
+        Lsp_Location *locations = push_array(arena, Lsp_Location, list->count);
+        i32 count = 0;
+        for (Json_Value *item = list->first; item != 0; item = item->next){
+            locations[count++] = lsp_location_from_json(item);
+        }
+        if (count == 1){
+            lsp_jump_to_location(app, view, locations[0]);
+        }
+        else{
+            lsp_choose_location(app, view, locations, count, push_u8_stringf(arena, "%.*s:", string_expand(json_get(command, "title")->string)));
+        }
+    }
+    else{
+        lsp_run_command(app, arena, command);
+    }
+}
+
+CUSTOM_UI_COMMAND_SIG(lsp_code_lens)
+CUSTOM_DOC("Runs a code lens of the cursor line (references, implementations), like vim-lsp's LspCodeLens.")
+{
+    View_ID view = 0;
+    Buffer_ID buffer = 0;
+    Lsp_Document *doc = lsp_active_document(app, &view, &buffer);
+    if (doc == 0){
+        return;
+    }
+    Scratch_Block scratch(app);
+    i64 line_index = 0;
+    i64 character = 0;
+    lsp_position_from_pos(app, buffer, view_get_cursor_pos(app, view), &line_index, &character);
+    Json_Value *result = lsp_request(app, scratch, "textDocument/codeLens",
+                                     push_u8_stringf(scratch, "{\"textDocument\":{\"uri\":\"%.*s\"}}",
+                                                     string_expand(json_escape(scratch, doc->uri))));
+    Json_Value **commands = push_array(scratch, Json_Value*, (result != 0)?clamp_bot(1, result->count):1);
+    i32 count = 0;
+    for (Json_Value *lens = (result != 0 && result->kind == JsonKind_Array)?result->first:0; lens != 0; lens = lens->next){
+        Json_Value *start = json_get(json_get(lens, "range"), "start");
+        if (json_i64(json_get(start, "line")) != line_index){
+            continue;
+        }
+        Json_Value *command = json_get(lens, "command");
+        if (command->kind != JsonKind_Object){
+            Json_Value *resolved = lsp_request(app, scratch, "codeLens/resolve", lens->raw);
+            command = json_get(resolved, "command");
+        }
+        if (command->kind == JsonKind_Object){
+            commands[count++] = command;
+        }
+    }
+    if (count == 0){
+        print_message(app, string_u8_litexpr("lsp: no code lens on this line\n"));
+        return;
+    }
+    if (count == 1){
+        lsp_run_code_lens_command(app, scratch, view, commands[0]);
+        return;
+    }
+    Lister_Block lister(app, scratch);
+    lister_set_query(lister, "Code lens:");
+    lister_set_default_handlers(lister);
+    ((Lister*)lister)->fuzzy_filter = true;
+    for (i32 i = 0; i < count; i += 1){
+        lister_add_item(lister, json_get(commands[i], "title")->string, SCu8(), IntAsPtr(i), 0);
+    }
+    Lister_Result l_result = run_lister(app, lister);
+    if (!l_result.canceled){
+        lsp_run_code_lens_command(app, scratch, view, commands[PtrAsInt(l_result.user_data)]);
+    }
+}
+
 CUSTOM_UI_COMMAND_SIG(lsp_code_actions)
 CUSTOM_DOC("Lists the language server's quick fixes and refactorings for the cursor line.")
 {
@@ -2755,9 +2858,9 @@ CUSTOM_DOC("Adds missing imports and removes unused ones using the language serv
     lsp_code_action(app, "source.organizeImports", true);
 }
 
-CUSTOM_COMMAND_SIG(lsp_format)
-CUSTOM_DOC("Formats the file with the language server.")
-{
+// NOTE(lsp): Formats lines (1 based), or the whole file when lines is empty.
+function void
+lsp_format_lines(Application_Links *app, Range_i64 lines){
     View_ID view = 0;
     Buffer_ID buffer = 0;
     Lsp_Document *doc = lsp_active_document(app, &view, &buffer);
@@ -2767,15 +2870,31 @@ CUSTOM_DOC("Formats the file with the language server.")
     Scratch_Block scratch(app);
     i32 indent_width = (i32)def_get_config_u64(app, vars_save_string_lit("indent_width"));
     b32 indent_with_tabs = def_get_config_b32(vars_save_string_lit("indent_with_tabs"));
-    String_Const_u8 params = push_u8_stringf(scratch, "{\"textDocument\":{\"uri\":\"%.*s\"},\"options\":{\"tabSize\":%d,\"insertSpaces\":%s}}",
-                                             string_expand(json_escape(scratch, doc->uri)), clamp_bot(1, indent_width),
-                                             indent_with_tabs?"false":"true");
-    Json_Value *result = lsp_request(app, scratch, "textDocument/formatting", params);
+    char *method = "textDocument/formatting";
+    String_Const_u8 range = string_u8_empty;
+    if (lines.min > 0){
+        method = "textDocument/rangeFormatting";
+        i64 last_index = 0;
+        i64 last_char = 0;
+        lsp_position_from_pos(app, buffer, get_line_end_pos(app, buffer, lines.max), &last_index, &last_char);
+        range = push_u8_stringf(scratch, "\"range\":{\"start\":{\"line\":%lld,\"character\":0},\"end\":{\"line\":%lld,\"character\":%lld}},",
+                                lines.min - 1, last_index, last_char);
+    }
+    String_Const_u8 params = push_u8_stringf(scratch, "{\"textDocument\":{\"uri\":\"%.*s\"},%.*s\"options\":{\"tabSize\":%d,\"insertSpaces\":%s}}",
+                                             string_expand(json_escape(scratch, doc->uri)), string_expand(range),
+                                             clamp_bot(1, indent_width), indent_with_tabs?"false":"true");
+    Json_Value *result = lsp_request(app, scratch, method, params);
     if (result != 0 && result->kind == JsonKind_Array && result->count > 0){
         Lsp_Edit *edits = push_array(scratch, Lsp_Edit, result->count);
         i32 count = lsp_collect_edits(app, buffer, result, edits, result->count);
         lsp_apply_edits(app, buffer, edits, count);
     }
+}
+
+CUSTOM_COMMAND_SIG(lsp_format)
+CUSTOM_DOC("Formats the file with the language server.")
+{
+    lsp_format_lines(app, Ii64(0, 0));
 }
 
 struct Lsp_Symbol{
@@ -3098,7 +3217,7 @@ lsp_draw_signature(Application_Links *app, View_ID view_id, Text_Layout_ID text_
 }
 
 function String_Const_u8
-lsp_status_label(Application_Links *app, Arena *arena, Buffer_ID buffer){
+lsp_status_label(Application_Links *app, Arena *arena, Buffer_ID buffer, b32 with_status){
     String_Const_u8 result = {};
     if (lsp_connection != 0 && lsp_buffer_is_java(app, buffer)){
         Lsp_Document *doc = lsp_document_from_buffer(buffer);
@@ -3113,11 +3232,15 @@ lsp_status_label(Application_Links *app, Arena *arena, Buffer_ID buffer){
             }
         }
         String_Const_u8 status = string_prefix(lsp_status, 40);
+        if (!with_status){
+            status = string_u8_empty;
+        }
+        String_Const_u8 space = (status.size > 0)?string_u8_litexpr(" "):string_u8_empty;
         if (errors > 0 || warnings > 0){
-            result = push_u8_stringf(arena, " jdtls %.*s E%d W%d ", string_expand(status), errors, warnings);
+            result = push_u8_stringf(arena, " jdtls%.*s%.*s E%d W%d ", string_expand(space), string_expand(status), errors, warnings);
         }
         else{
-            result = push_u8_stringf(arena, " jdtls %.*s ", string_expand(status));
+            result = push_u8_stringf(arena, " jdtls%.*s%.*s ", string_expand(space), string_expand(status));
         }
     }
     return(result);

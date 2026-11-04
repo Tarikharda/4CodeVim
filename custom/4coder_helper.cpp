@@ -1500,6 +1500,44 @@ Query_Bar_Group::~Query_Bar_Group(){
     clear_all_query_bars(this->app, this->view);
 }
 
+// NOTE: Like Ctrl-W in vim's command line: drops trailing spaces, then the word (or the run
+// of punctuation) before them.
+function String_Const_u8
+query_bar_backspace_word(String_Const_u8 string){
+    u64 size = string.size;
+    for (;size > 0 && character_is_whitespace(string.str[size - 1]); size -= 1);
+    if (size > 0){
+        b32 word = (character_is_alpha_numeric(string.str[size - 1]) || string.str[size - 1] == '_');
+        for (;size > 0;){
+            u8 c = string.str[size - 1];
+            b32 c_word = (character_is_alpha_numeric(c) || c == '_');
+            if (character_is_whitespace(c) || c_word != word){
+                break;
+            }
+            size -= 1;
+        }
+    }
+    return(string_prefix(string, size));
+}
+
+// NOTE: Ctrl-U clears and Ctrl-W deletes a word in a query bar, as in vim's command line.
+// Returns false for any other event.
+function b32
+query_bar_edit_key(Query_Bar *bar, Input_Event *event){
+    b32 result = false;
+    if (event->kind == InputEventKind_KeyStroke && has_modifier(&event->key.modifiers, KeyCode_Control)){
+        if (event->key.code == KeyCode_U){
+            bar->string.size = 0;
+            result = true;
+        }
+        else if (event->key.code == KeyCode_W){
+            bar->string = query_bar_backspace_word(bar->string);
+            result = true;
+        }
+    }
+    return(result);
+}
+
 function b32
 query_user_general(Application_Links *app, Query_Bar *bar, b32 force_number, String_Const_u8 init_string){
     if (start_query_bar(app, bar, 0) == 0){
@@ -1548,6 +1586,8 @@ query_user_general(Application_Links *app, Query_Bar *bar, b32 force_number, Str
         else if (in.event.kind == InputEventKind_KeyStroke &&
                  in.event.key.code == KeyCode_Backspace){
             bar->string = backspace_utf8(bar->string);
+        }
+        else if (query_bar_edit_key(bar, &in.event)){
         }
         else if (good_insert){
             String_u8 string = Su8(bar->string.str, bar->string.size, bar->string_capacity);

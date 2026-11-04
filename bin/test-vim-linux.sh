@@ -58,6 +58,11 @@ run_case(){
     local fixture="$1"; shift
     local file="$WORK_DIR/case.$ext"
     printf '%s' "$fixture" > "$file"
+    if [[ "$CASE_NAME" == git* ]]; then
+        # NOTE: git cases start from a committed fixture, so edits show up as hunks.
+        git -C "$WORK_DIR" add "case.$ext"
+        git -C "$WORK_DIR" -c user.name=test -c user.email=test@test commit -q -m fixture > /dev/null 2>&1
+    fi
 
     pushd "$BUILD_ROOT" > /dev/null
     ./4ed "$file" > /dev/null 2>&1 &
@@ -66,7 +71,7 @@ run_case(){
 
     local window=""
     for i in $(seq 1 50); do
-        window="$(xdotool search --all --pid $pid --name "4coder" 2>/dev/null | head -1)"
+        window="$(xdotool search --all --onlyvisible --pid $pid --name "" 2>/dev/null | head -1)"
         [ -n "$window" ] && break
         sleep 0.1
     done
@@ -111,6 +116,7 @@ check(){
     if [ -n "$FILTER" ] && [[ "$name" != *"$FILTER"* ]]; then
         return
     fi
+    CASE_NAME="$name"
     local actual
     actual="$(run_case "$ext" "$fixture" "$@"; echo x)"
     actual="${actual%x}"
@@ -176,6 +182,8 @@ check "insert count"         txt "$TXT" $'abababalpha beta gamma\n'"$L2"$'\n'"$L
 check "named register"       txt "$TXT" "$L1"$'\n'"$L2"$'\n'"$L1"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg 't:"ayy' t:j 't:"ap'
 check "black hole register"  txt "$TXT" "$L1"$'\n'"$L3"$'\n'"$L1"$'\n'"$L4"$'\n'  t:gg t:yy t:j 't:"_dd' t:p
 check "yank register 0"      txt "$TXT" "$L1"$'\nalpha three (a, b) "str"\n'"$L4"$'\n'  t:gg t:yw t:j t:dd 't:"0P'
+check "YY clipboard"         txt "$TXT" "$L1"$'\n'"$L2"$'\n'"$L1"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:YY t:j 't:"+p'
+check "visual Y clipboard"   txt "$TXT" "$L1"$'\nalpha'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:viwY t:j 't:"+P'
 check "visual p"             txt "$TXT" $'alpha alpha gamma\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:yiw t:w t:viwp
 check "marks"                txt "$TXT" "$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:ma t:G "t:'a" t:dd
 check "macro"                txt "$TXT" "$L1"$';\n'"$L2"$';\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:qa 't:A;' k:Escape t:j t:q t:@a
@@ -185,10 +193,16 @@ check "macro count"          txt "$TXT" "$L1"$';\n'"$L2"$';\n'"$L3"$';\n'"$L4"$'
 check "search"               txt "$TXT" "$L1"$'\n    indented \n'"$L3"$'\n'"$L4"$'\n'  t:gg t:/line k:Return t:D
 check "smartcase"            txt "$TXT" $'lpha beta gamma\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:/BETA k:Return t:x
 check "search n"             txt "$TXT" $'alph beta gamma\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t:/a k:Return t:x
+check "search ctrl-w"        txt "$TXT" $'alpha eta gamma\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg "t:/beta zzz" k:ctrl+w k:Return t:x
+check "ex ctrl-u"            txt "$TXT" $'Xlpha beta gamma\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg "t::foo bar" k:ctrl+u t:s/a/X/ k:Return
 check ":s first only"        txt "$TXT" $'Xlpha beta gamma\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\n'  t:gg t::s/a/X/ k:Return
 check ":%s global"           txt "$TXT" $'XlphX betX gXmmX\n'"$L2"$'\nthree (X, b) "str"\n'"$L4"$'\n'  t::%s/a/X/g k:Return
 check ":2,3d"                txt "$TXT" "$L1"$'\n'"$L4"$'\n'  t::2,3d k:Return
 check "visual :s"            txt "$TXT" $'Xlpha beta gamma\n'"$L2"$'\nthree (X, b) "str"\n'"$L4"$'\n'  t:gg t:Vjj t::s/a/X/ k:Return
+
+# Git signs
+check "git ]h next hunk"     txt "$TXT" "$L1"$'\n'"$L2"$'\n'"$L3"$'\n'"$L4"$'\nEW\n'  t:G t:oNEW k:Escape t:gg t:]h t:x
+check "git hunk reset"       txt "$TXT" "$TXT"  t:gg t:x t:j t:x t:k "t: ghr"
 
 # Pickers
 check ":Rg fuzzy jump"       txt "$TXT" "$L1"$'\n'"$L2"$'\n'"$L3"$'\n'  t::Rg\ e k:Return "t:fo end" k:Return t:dd
