@@ -1,0 +1,176 @@
+/*
+4coder_vim_keys.cpp - The key reference shown by Space ? and :keys.
+*/
+
+// TOP
+
+#if !defined(FCODER_VIM_KEYS_CPP)
+#define FCODER_VIM_KEYS_CPP
+
+// NOTE(vim): Keep this in sync with vim_setup_mapping, vim_normal, vim_visual, vim_leader,
+// vim_execute_ex and ship_files/bindings.4coder when keys change.
+global char vim_keys_text[] =
+"MY EDITOR - KEYS                    Space ?  or  :keys  opens this list\n"
+"                                    /word searches it, Space b or :bd leaves it\n"
+"\n"
+"== MODES ==================================================================\n"
+"  i a I A o O     insert (before, after, line start, line end, new line below/above)\n"
+"  R               replace mode            v / V      visual / visual line\n"
+"  Esc             back to normal          Esc Esc    clear search highlight\n"
+"  gi              insert where you last stopped inserting\n"
+"  gv              reselect the last visual selection\n"
+"\n"
+"== MOVE (normal and visual; take counts like 5j) ==========================\n"
+"  h j k l         left down up right      gj gk      move by screen lines\n"
+"  w W  b B  e E   word forward / back / end (W B E: words split by spaces only)\n"
+"  K               same as E (vimrc)\n"
+"  0 ^ _ $  g_     line start, first non-blank, line end, last non-blank\n"
+"  gg G  5G        first line, last line, line 5\n"
+"  H M L           top / middle / bottom of the screen\n"
+"  { }             previous / next paragraph\n"
+"  %               matching bracket\n"
+"  f F t T {char}  to / till a char on the line; ; repeats, , repeats backwards\n"
+"  / ?             search forward / backward;  n N next / previous match\n"
+"  * #             search the word under the cursor forward / backward\n"
+"  m{a-z}          set a mark;  '{a-z} line of the mark, `{a-z} exact spot\n"
+"  Ctrl-O          jump back                Enter      next line (follows a jump\n"
+"                                                      in read only lists)\n"
+"\n"
+"== SCROLL =================================================================\n"
+"  Ctrl-D Ctrl-U   half page down / up      Ctrl-F Ctrl-B   page down / up\n"
+"  Ctrl-E Ctrl-Y   scroll one line          PageUp PageDown\n"
+"  zz z.           center the cursor line   zt z<Enter>  line to top\n"
+"  zb z-           line to bottom\n"
+"\n"
+"== EDIT (normal) ==========================================================\n"
+"  x X             delete char under / before the cursor\n"
+"  s S             change char / change line\n"
+"  D C             delete / change to end of line\n"
+"  d c y {motion}  delete / change / yank, e.g. dw, c$, y}, d3j\n"
+"  dd cc yy        whole line (with counts: 3dd)\n"
+"  > < = {motion}  indent / dedent / reindent  (>> << == for one line)\n"
+"  Y               yank line                YY         copy line to the clipboard\n"
+"  p P             paste after / before\n"
+"  u   Ctrl-R      undo / redo              .          repeat the last change\n"
+"  r{char}         replace one char         J  gJ      join lines (gJ: no space)\n"
+"  ~               toggle case of the char  g~ gu gU {motion}  toggle / lower / upper\n"
+"  Ctrl-A Ctrl-X   add / subtract one from the number at the cursor\n"
+"  gcc             comment / uncomment the line (3gcc: three lines)\n"
+"  \"{reg}          use a register for the next d/y/p, e.g. \"ayy \"ap  (\"+ clipboard)\n"
+"  q{a-z} ... q    record a macro           @{a-z}  play it, @@ again, @: last :cmd\n"
+"\n"
+"== TEXT OBJECTS (after d c y v ...: diw, ci\", va{) ==========================\n"
+"  iw aw  iW aW    word                     ip ap      paragraph\n"
+"  i\" a\" i' a' i` a`                        quotes\n"
+"  i( a( ib ab     parentheses              i{ a{ iB aB   braces\n"
+"  i[ a[           brackets                 i< a<      angle brackets\n"
+"\n"
+"== VISUAL MODE ============================================================\n"
+"  (all moves)     extend the selection     o          go to the other end\n"
+"  d x y c s       delete / yank / change the selection\n"
+"  D X C S R       same, whole lines        Y          copy to the clipboard\n"
+"  > < = ~ u U J   indent, dedent, reindent, toggle case, lower, upper, join\n"
+"  r{char}         replace every char       p P        paste over (P keeps register)\n"
+"  i a {object}    select a text object     :          run a command on the lines\n"
+"  Space ca        code actions             Space cf   format the selection\n"
+"  Space sr        grep the selected text\n"
+"\n"
+"== INSERT MODE ============================================================\n"
+"  Esc Ctrl-[ Ctrl-C   back to normal\n"
+"  Ctrl-W Ctrl-U   delete word / to line start      Ctrl-H     backspace\n"
+"  Ctrl-T Ctrl-D   indent / dedent the line         Ctrl-R{reg} insert a register\n"
+"  Ctrl-N Ctrl-P   next / previous completion (opens the menu)\n"
+"  Tab Shift-Tab   next / previous completion, or next snippet field, else a tab\n"
+"  Enter Ctrl-Y    accept the completion            Ctrl-E     close the menu\n"
+"  Ctrl-K          signature help\n"
+"\n"
+"== SPACE (the leader, in normal mode) =====================================\n"
+"  Space ?         this list\n"
+"  Files           Space ms  find file in project     Space mt  find file in this folder\n"
+"                  Space e   browse the project       Space E   browse the start folder\n"
+"                  Space b   switch buffer            Space k   close a buffer\n"
+"                  Space w   save                     Space x   all commands\n"
+"  Search          Space Space s  grep the project    Space Space t  grep this folder\n"
+"                  Space sr  grep the word under the cursor\n"
+"                  Space n / Space p  next / previous result     Space l  functions here\n"
+"  Language server Space i   diagnostics list         Space r   references\n"
+"                  Space o   symbols in file (also Space ss)     Space sS  workspace symbols\n"
+"                  Space ca  code actions   Space cr  rename   Space cf  format   Space cl  code lens\n"
+"  Git             Space gg  lazygit       Space gl  log       Space gL  log of start folder\n"
+"                  Space gf  file history  Space gb  blame line\n"
+"                  Space ghs stage hunk    Space ghr reset hunk   Space ghp preview hunk\n"
+"  Tests (JUnit)   Space tr  nearest test  Space tt  this class   Space tT  whole module\n"
+"                  Space ts  pick a test   Space tl  run last     Space tf  rerun failed\n"
+"                  Space to  show/hide panel                      Space tx  stop\n"
+"  Terminal        Space ft  at the project root    Space fT  at the start folder\n"
+"\n"
+"== LANGUAGE SERVER (normal) ===============================================\n"
+"  gd  Ctrl-]      go to definition         gD  ge     declaration (ge also definition)\n"
+"  gI gy           implementation / type definition\n"
+"  gr gn           references               gh         hover docs    gK  signature\n"
+"  ]d [d           next / previous diagnostic        Ctrl-W d  diagnostics of the line\n"
+"  F2 F4           workspace / file symbols\n"
+"\n"
+"== GIT (normal) ===========================================================\n"
+"  ]h [h           next / previous changed hunk\n"
+"\n"
+"== WINDOWS (Ctrl-W then a key) ============================================\n"
+"  w l j Ctrl-W    next panel               W h k p    previous panel\n"
+"  s               split horizontally       v          split vertically\n"
+"  q c             close the panel          x          swap panels\n"
+"  Tab             next panel (normal mode)\n"
+"\n"
+"== : COMMANDS =============================================================\n"
+"  :w :wa :q :q! :wq :x :qa :qa!   save / quit as in vim     ZZ  save+close  ZQ  close\n"
+"  :e file  :e!    open a file / reload it from disk\n"
+"  :sp :vs         split / vertical split\n"
+"  :b :ls  :bn :bp  :bd             buffers: pick, next, previous, close\n"
+"  :Files :Buffers :Rg pattern      fuzzy file / buffer / grep pickers\n"
+"  :cn :cp         next / previous result of the last grep or test run\n"
+"  :%s/a/b/g  :s/a/b/   substitute (ranges: :%  :.,.+3  :'<,'>)\n"
+"  :d :y :> :< :j  delete / yank / indent / dedent / join the lines\n"
+"  :12             go to line 12            :noh       clear search highlight\n"
+"  :set nu / nonu, wrap / nowrap, ic / noic, scs / noscs, hls / nohls\n"
+"  :Format :OrganizeImports :LspRename :LspDiagnostics :LspInfo :LspRestart\n"
+"  :Git :Gstatus  lazygit             :Gblame   blame the line\n"
+"  :Test [name]  :TestAll  run JUnit tests       :make   build\n"
+"\n"
+"== MACOS ONLY =============================================================\n"
+"  Cmd-S save   Cmd-C copy   Cmd-X cut   Cmd-V paste   Cmd-A select all\n"
+"  Cmd-Z undo   Cmd-Shift-Z redo   Cmd-= / Cmd-- bigger / smaller font\n"
+"  Cmd-Q quit (asks about unsaved files)   Cmd-H hide   Cmd-M minimize\n"
+"  Ctrl-Cmd-F full screen\n"
+"\n"
+"== 4CODER KEYS (Ctrl/Alt chords the vim layer does not use) ===============\n"
+"  Alt-X           all commands            Alt-Shift-X  project commands\n"
+"  Ctrl-I          switch buffer           Ctrl-K       close a buffer (normal mode)\n"
+"  Ctrl-N          new file (normal mode)  Ctrl-Shift-S save all files\n"
+"  Ctrl-, Ctrl-Shift-,  next / previous panel\n"
+"  Ctrl-H          go to the project root  Ctrl-P       jump to the last point\n"
+"  Ctrl-Shift-I    functions in this file  Alt-\\        swap to the previous buffer\n"
+"  Alt-N Alt-Shift-N   next / previous jump (grep, build errors)\n"
+"  Alt-M           build                   Alt-.  Alt-,  show / close the build panel\n"
+"  Alt-Z           run a shell command     Alt-Shift-Z  run it again\n"
+"  Alt-B           show / hide the file bar\n"
+"  F1 ... F16      project.4coder commands (F2 and F4 are symbols in normal mode)\n";
+
+CUSTOM_COMMAND_SIG(vim_show_keys)
+CUSTOM_DOC("Shows the list of keys (Space ? or :keys) in a read only *keys* buffer.")
+{
+    String_Const_u8 name = string_u8_litexpr("*keys*");
+    Buffer_ID buffer = get_buffer_by_name(app, name, Access_Always);
+    if (buffer == 0){
+        buffer = create_buffer(app, name, BufferCreate_AlwaysNew);
+        buffer_set_setting(app, buffer, BufferSetting_Unimportant, true);
+        buffer_set_setting(app, buffer, BufferSetting_ReadOnly, true);
+    }
+    clear_buffer(app, buffer);
+    buffer_replace_range(app, buffer, Ii64((i64)0), SCu8(vim_keys_text, sizeof(vim_keys_text) - 1));
+    View_ID view = get_active_view(app, Access_Always);
+    view_set_buffer(app, view, buffer, 0);
+    view_set_cursor_and_preferred_x(app, view, seek_pos(0));
+}
+
+#endif //FCODER_VIM_KEYS_CPP
+
+// BOTTOM

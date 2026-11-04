@@ -45,6 +45,7 @@ Languages: only the C++ lexer exists (`custom/generated/lexer_cpp.*`, produced b
 
 ### Vim layer (`custom/4coder_vim.cpp`)
 
+- `Space ?`, `:keys` and `:help` open the key reference `vim_keys_text` (`custom/4coder_vim_keys.cpp`) in a read only `*keys*` buffer. Update it whenever a key is added, moved or removed.
 - Installed by `vim_init`: sets `implicit_map_function = vim_implicit_map` and the render caller hook. Its key maps live in a separate `vim_mapping` because of the `framework_mapping` reset above.
 - Insert mode defers to the normal 4coder maps (typing, auto indent, completion). Normal/visual mode handle plain keys as **text events** (`vim_handle_text`), so shifted symbols are layout independent; Ctrl/Alt chords and special keys go through `vim_mapping`, then fall back to the 4coder maps.
 - Multi key commands (operators, `f`/`t`, `g`/`z` prefixes, registers) read further characters with `vim_read_char` inside the running command.

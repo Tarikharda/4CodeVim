@@ -2397,6 +2397,9 @@ vim_execute_ex(Application_Links *app, View_ID view, Buffer_ID buffer, String_Co
     else if (VimEx("noh") || VimEx("nohlsearch")){
         vim_search_highlight = false;
     }
+    else if (VimEx("keys") || VimEx("help") || VimEx("h")){
+        vim_show_keys(app);
+    }
     else{
         Scratch_Block scratch(app);
         print_message(app, push_u8_stringf(scratch, "vim: not an editor command: %.*s\n", string_expand(cmd)));
@@ -2447,6 +2450,7 @@ vim_leader(Application_Links *app){
     }
     u8 c2 = 0;
     switch (c){
+        case '?': vim_show_keys(app); break;
         case 'i': lsp_list_diagnostics(app); break;
         case 'o': lsp_document_symbols(app); break;
         case 'e':

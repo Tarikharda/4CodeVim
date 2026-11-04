@@ -2,7 +2,7 @@
 #define command_id(c) (fcoder_metacmd_ID_##c)
 #define command_metadata(c) (&fcoder_metacmd_table[command_id(c)])
 #define command_metadata_by_id(id) (&fcoder_metacmd_table[id])
-#define command_one_past_last_id 359
+#define command_one_past_last_id 360
 #if defined(CUSTOM_COMMAND_SIG)
 #define PROC_LINKS(x,y) x
 #else
@@ -354,6 +354,7 @@ CUSTOM_COMMAND_SIG(vim_return);
 CUSTOM_COMMAND_SIG(vim_right);
 CUSTOM_COMMAND_SIG(vim_scroll_down_line);
 CUSTOM_COMMAND_SIG(vim_scroll_up_line);
+CUSTOM_COMMAND_SIG(vim_show_keys);
 CUSTOM_COMMAND_SIG(vim_up);
 CUSTOM_COMMAND_SIG(vim_visual_block_unsupported);
 CUSTOM_COMMAND_SIG(vim_window_command);
@@ -380,7 +381,7 @@ char *source_name;
 i32 source_name_len;
 i32 line_number;
 };
-static Command_Metadata fcoder_metacmd_table[359] = {
+static Command_Metadata fcoder_metacmd_table[360] = {
 { PROC_LINKS(allow_mouse, 0), false, "allow_mouse", 11, "Shows the mouse and causes all mouse input to be processed normally.", 68, "../code/custom/4coder_default_framework.cpp", 43, 481 },
 { PROC_LINKS(auto_indent_line_at_cursor, 0), false, "auto_indent_line_at_cursor", 26, "Auto-indents the line on which the cursor sits.", 47, "../code/custom/4coder_auto_indent.cpp", 37, 420 },
 { PROC_LINKS(auto_indent_range, 0), false, "auto_indent_range", 17, "Auto-indents the range between the cursor and the mark.", 55, "../code/custom/4coder_auto_indent.cpp", 37, 430 },
@@ -686,49 +687,50 @@ static Command_Metadata fcoder_metacmd_table[359] = {
 { PROC_LINKS(undo_all_buffers, 0), false, "undo_all_buffers", 16, "Advances backward through the undo history in the buffer containing the most recent regular edit.", 97, "../code/custom/4coder_base_commands.cpp", 39, 1914 },
 { PROC_LINKS(view_buffer_other_panel, 0), false, "view_buffer_other_panel", 23, "Set the other non-active panel to view the buffer that the active panel views, and switch to that panel.", 104, "../code/custom/4coder_base_commands.cpp", 39, 1674 },
 { PROC_LINKS(view_jump_list_with_lister, 0), false, "view_jump_list_with_lister", 26, "When executed on a buffer with jumps, creates a persistent lister for all the jumps", 83, "../code/custom/4coder_jump_lister.cpp", 37, 59 },
-{ PROC_LINKS(vim_cmd_copy, 0), false, "vim_cmd_copy", 12, "Cmd-C: copies the visual selection to the system clipboard.", 59, "../code/custom/4coder_vim.cpp", 29, 3637 },
-{ PROC_LINKS(vim_cmd_cut, 0), false, "vim_cmd_cut", 11, "Cmd-X: cuts the visual selection to the system clipboard.", 57, "../code/custom/4coder_vim.cpp", 29, 3645 },
-{ PROC_LINKS(vim_cmd_paste, 0), false, "vim_cmd_paste", 13, "Cmd-V: pastes the system clipboard (before the cursor, over a selection, or as typed text in insert mode).", 106, "../code/custom/4coder_vim.cpp", 29, 3653 },
-{ PROC_LINKS(vim_cmd_redo, 0), false, "vim_cmd_redo", 12, "Shift-Cmd-Z: redo.", 18, "../code/custom/4coder_vim.cpp", 29, 3689 },
-{ PROC_LINKS(vim_cmd_save, 0), false, "vim_cmd_save", 12, "Cmd-S: saves the buffer, staying in the current mode.", 53, "../code/custom/4coder_vim.cpp", 29, 3710 },
-{ PROC_LINKS(vim_cmd_select_all, 0), false, "vim_cmd_select_all", 18, "Cmd-A: selects the whole buffer in visual line mode.", 52, "../code/custom/4coder_vim.cpp", 29, 3700 },
-{ PROC_LINKS(vim_cmd_undo, 0), false, "vim_cmd_undo", 12, "Cmd-Z: undo (leaves insert or visual mode first).", 49, "../code/custom/4coder_vim.cpp", 29, 3679 },
-{ PROC_LINKS(vim_decrement_number, 0), false, "vim_decrement_number", 20, "Vim <c-x>, subtracts one from the number at or after the cursor.", 64, "../code/custom/4coder_vim.cpp", 29, 3451 },
-{ PROC_LINKS(vim_delete_char, 0), false, "vim_delete_char", 15, "Vim x in normal mode.", 21, "../code/custom/4coder_vim.cpp", 29, 3433 },
-{ PROC_LINKS(vim_down, 0), false, "vim_down", 8, "Vim j motion.", 13, "../code/custom/4coder_vim.cpp", 29, 3404 },
-{ PROC_LINKS(vim_half_page_down, 0), false, "vim_half_page_down", 18, "Vim <c-d>, moves the cursor down half a screen.", 47, "../code/custom/4coder_vim.cpp", 29, 3484 },
-{ PROC_LINKS(vim_half_page_up, 0), false, "vim_half_page_up", 16, "Vim <c-u>, moves the cursor up half a screen.", 45, "../code/custom/4coder_vim.cpp", 29, 3490 },
-{ PROC_LINKS(vim_handle_text, 0), false, "vim_handle_text", 15, "Interprets typed text as a vim normal or visual mode command.", 61, "../code/custom/4coder_vim.cpp", 29, 3267 },
-{ PROC_LINKS(vim_increment_number, 0), false, "vim_increment_number", 20, "Vim <c-a>, adds one to the number at or after the cursor.", 57, "../code/custom/4coder_vim.cpp", 29, 3445 },
-{ PROC_LINKS(vim_insert_accept, 0), false, "vim_insert_accept", 17, "Insert <c-y>: accepts the selected completion.", 46, "../code/custom/4coder_vim.cpp", 29, 3790 },
-{ PROC_LINKS(vim_insert_backspace, 0), false, "vim_insert_backspace", 20, "Vim insert mode backspace; on a snippet placeholder it clears the placeholder.", 78, "../code/custom/4coder_vim.cpp", 29, 3734 },
-{ PROC_LINKS(vim_insert_close_menu, 0), false, "vim_insert_close_menu", 21, "Insert <c-e>: closes the completion menu.", 41, "../code/custom/4coder_vim.cpp", 29, 3796 },
-{ PROC_LINKS(vim_insert_dedent, 0), false, "vim_insert_dedent", 17, "Vim insert mode <c-d>, removes one level of indentation from the current line.", 78, "../code/custom/4coder_vim.cpp", 29, 3581 },
-{ PROC_LINKS(vim_insert_delete_line, 0), false, "vim_insert_delete_line", 22, "Vim insert mode <c-u>, deletes back to the indentation or the start of the line.", 80, "../code/custom/4coder_vim.cpp", 29, 3544 },
-{ PROC_LINKS(vim_insert_delete_word, 0), false, "vim_insert_delete_word", 22, "Vim insert mode <c-w>, deletes the word before the cursor.", 58, "../code/custom/4coder_vim.cpp", 29, 3520 },
-{ PROC_LINKS(vim_insert_down, 0), false, "vim_insert_down", 15, "Selects the next completion, or moves down a line.", 50, "../code/custom/4coder_vim.cpp", 29, 3746 },
-{ PROC_LINKS(vim_insert_indent, 0), false, "vim_insert_indent", 17, "Vim insert mode <c-t>, indents the current line.", 48, "../code/custom/4coder_vim.cpp", 29, 3575 },
-{ PROC_LINKS(vim_insert_next, 0), false, "vim_insert_next", 15, "Vim insert <c-n>: next completion, opening the menu if needed.", 62, "../code/custom/4coder_vim.cpp", 29, 3778 },
-{ PROC_LINKS(vim_insert_prev, 0), false, "vim_insert_prev", 15, "Vim insert <c-p>: previous completion, opening the menu if needed.", 66, "../code/custom/4coder_vim.cpp", 29, 3784 },
-{ PROC_LINKS(vim_insert_register, 0), false, "vim_insert_register", 19, "Vim insert mode <c-r>{register}, inserts the contents of a register.", 68, "../code/custom/4coder_vim.cpp", 29, 3587 },
-{ PROC_LINKS(vim_insert_return, 0), false, "vim_insert_return", 17, "Insert <cr>: accepts the selected completion, otherwise breaks the line.", 72, "../code/custom/4coder_vim.cpp", 29, 3804 },
-{ PROC_LINKS(vim_insert_shift_tab, 0), false, "vim_insert_shift_tab", 20, "Insert <s-tab>: selects the previous completion.", 48, "../code/custom/4coder_vim.cpp", 29, 3813 },
-{ PROC_LINKS(vim_insert_tab, 0), false, "vim_insert_tab", 14, "Insert <tab>: selects the next completion, or jumps to the next snippet placeholder, otherwise types a tab.", 107, "../code/custom/4coder_vim.cpp", 29, 3824 },
-{ PROC_LINKS(vim_insert_text, 0), false, "vim_insert_text", 15, "Inserts typed text in vim insert mode and updates completion and signature help.", 80, "../code/custom/4coder_vim.cpp", 29, 3721 },
-{ PROC_LINKS(vim_insert_up, 0), false, "vim_insert_up", 13, "Selects the previous completion, or moves up a line.", 52, "../code/custom/4coder_vim.cpp", 29, 3757 },
-{ PROC_LINKS(vim_left, 0), false, "vim_left", 8, "Vim h motion.", 13, "../code/custom/4coder_vim.cpp", 29, 3386 },
-{ PROC_LINKS(vim_line_end_motion, 0), false, "vim_line_end_motion", 19, "Vim $ motion.", 13, "../code/custom/4coder_vim.cpp", 29, 3416 },
-{ PROC_LINKS(vim_line_start, 0), false, "vim_line_start", 14, "Vim 0 motion.", 13, "../code/custom/4coder_vim.cpp", 29, 3410 },
-{ PROC_LINKS(vim_normal_mode, 0), false, "vim_normal_mode", 15, "Leaves insert, replace or visual mode and returns to vim normal mode.", 69, "../code/custom/4coder_vim.cpp", 29, 3322 },
-{ PROC_LINKS(vim_redo, 0), false, "vim_redo", 8, "Vim <c-r>, redo.", 16, "../code/custom/4coder_vim.cpp", 29, 3439 },
-{ PROC_LINKS(vim_replace_text, 0), false, "vim_replace_text", 16, "Overwrites the character under the cursor with typed text in vim replace mode.", 78, "../code/custom/4coder_vim.cpp", 29, 3349 },
-{ PROC_LINKS(vim_return, 0), false, "vim_return", 10, "In read only buffers follows the jump under the cursor, otherwise moves to the next line.", 89, "../code/custom/4coder_vim.cpp", 29, 3360 },
-{ PROC_LINKS(vim_right, 0), false, "vim_right", 9, "Vim l motion.", 13, "../code/custom/4coder_vim.cpp", 29, 3392 },
-{ PROC_LINKS(vim_scroll_down_line, 0), false, "vim_scroll_down_line", 20, "Vim <c-e>, scrolls the view down one line.", 42, "../code/custom/4coder_vim.cpp", 29, 3457 },
-{ PROC_LINKS(vim_scroll_up_line, 0), false, "vim_scroll_up_line", 18, "Vim <c-y>, scrolls the view up one line.", 40, "../code/custom/4coder_vim.cpp", 29, 3463 },
-{ PROC_LINKS(vim_up, 0), false, "vim_up", 6, "Vim k motion.", 13, "../code/custom/4coder_vim.cpp", 29, 3398 },
-{ PROC_LINKS(vim_visual_block_unsupported, 0), false, "vim_visual_block_unsupported", 28, "Placeholder for vim <c-v>, visual block mode is not implemented.", 64, "../code/custom/4coder_vim.cpp", 29, 3514 },
-{ PROC_LINKS(vim_window_command, 0), false, "vim_window_command", 18, "Vim <c-w> prefix for panel commands.", 36, "../code/custom/4coder_vim.cpp", 29, 3496 },
+{ PROC_LINKS(vim_cmd_copy, 0), false, "vim_cmd_copy", 12, "Cmd-C: copies the visual selection to the system clipboard.", 59, "../code/custom/4coder_vim.cpp", 29, 3641 },
+{ PROC_LINKS(vim_cmd_cut, 0), false, "vim_cmd_cut", 11, "Cmd-X: cuts the visual selection to the system clipboard.", 57, "../code/custom/4coder_vim.cpp", 29, 3649 },
+{ PROC_LINKS(vim_cmd_paste, 0), false, "vim_cmd_paste", 13, "Cmd-V: pastes the system clipboard (before the cursor, over a selection, or as typed text in insert mode).", 106, "../code/custom/4coder_vim.cpp", 29, 3657 },
+{ PROC_LINKS(vim_cmd_redo, 0), false, "vim_cmd_redo", 12, "Shift-Cmd-Z: redo.", 18, "../code/custom/4coder_vim.cpp", 29, 3693 },
+{ PROC_LINKS(vim_cmd_save, 0), false, "vim_cmd_save", 12, "Cmd-S: saves the buffer, staying in the current mode.", 53, "../code/custom/4coder_vim.cpp", 29, 3714 },
+{ PROC_LINKS(vim_cmd_select_all, 0), false, "vim_cmd_select_all", 18, "Cmd-A: selects the whole buffer in visual line mode.", 52, "../code/custom/4coder_vim.cpp", 29, 3704 },
+{ PROC_LINKS(vim_cmd_undo, 0), false, "vim_cmd_undo", 12, "Cmd-Z: undo (leaves insert or visual mode first).", 49, "../code/custom/4coder_vim.cpp", 29, 3683 },
+{ PROC_LINKS(vim_decrement_number, 0), false, "vim_decrement_number", 20, "Vim <c-x>, subtracts one from the number at or after the cursor.", 64, "../code/custom/4coder_vim.cpp", 29, 3455 },
+{ PROC_LINKS(vim_delete_char, 0), false, "vim_delete_char", 15, "Vim x in normal mode.", 21, "../code/custom/4coder_vim.cpp", 29, 3437 },
+{ PROC_LINKS(vim_down, 0), false, "vim_down", 8, "Vim j motion.", 13, "../code/custom/4coder_vim.cpp", 29, 3408 },
+{ PROC_LINKS(vim_half_page_down, 0), false, "vim_half_page_down", 18, "Vim <c-d>, moves the cursor down half a screen.", 47, "../code/custom/4coder_vim.cpp", 29, 3488 },
+{ PROC_LINKS(vim_half_page_up, 0), false, "vim_half_page_up", 16, "Vim <c-u>, moves the cursor up half a screen.", 45, "../code/custom/4coder_vim.cpp", 29, 3494 },
+{ PROC_LINKS(vim_handle_text, 0), false, "vim_handle_text", 15, "Interprets typed text as a vim normal or visual mode command.", 61, "../code/custom/4coder_vim.cpp", 29, 3271 },
+{ PROC_LINKS(vim_increment_number, 0), false, "vim_increment_number", 20, "Vim <c-a>, adds one to the number at or after the cursor.", 57, "../code/custom/4coder_vim.cpp", 29, 3449 },
+{ PROC_LINKS(vim_insert_accept, 0), false, "vim_insert_accept", 17, "Insert <c-y>: accepts the selected completion.", 46, "../code/custom/4coder_vim.cpp", 29, 3794 },
+{ PROC_LINKS(vim_insert_backspace, 0), false, "vim_insert_backspace", 20, "Vim insert mode backspace; on a snippet placeholder it clears the placeholder.", 78, "../code/custom/4coder_vim.cpp", 29, 3738 },
+{ PROC_LINKS(vim_insert_close_menu, 0), false, "vim_insert_close_menu", 21, "Insert <c-e>: closes the completion menu.", 41, "../code/custom/4coder_vim.cpp", 29, 3800 },
+{ PROC_LINKS(vim_insert_dedent, 0), false, "vim_insert_dedent", 17, "Vim insert mode <c-d>, removes one level of indentation from the current line.", 78, "../code/custom/4coder_vim.cpp", 29, 3585 },
+{ PROC_LINKS(vim_insert_delete_line, 0), false, "vim_insert_delete_line", 22, "Vim insert mode <c-u>, deletes back to the indentation or the start of the line.", 80, "../code/custom/4coder_vim.cpp", 29, 3548 },
+{ PROC_LINKS(vim_insert_delete_word, 0), false, "vim_insert_delete_word", 22, "Vim insert mode <c-w>, deletes the word before the cursor.", 58, "../code/custom/4coder_vim.cpp", 29, 3524 },
+{ PROC_LINKS(vim_insert_down, 0), false, "vim_insert_down", 15, "Selects the next completion, or moves down a line.", 50, "../code/custom/4coder_vim.cpp", 29, 3750 },
+{ PROC_LINKS(vim_insert_indent, 0), false, "vim_insert_indent", 17, "Vim insert mode <c-t>, indents the current line.", 48, "../code/custom/4coder_vim.cpp", 29, 3579 },
+{ PROC_LINKS(vim_insert_next, 0), false, "vim_insert_next", 15, "Vim insert <c-n>: next completion, opening the menu if needed.", 62, "../code/custom/4coder_vim.cpp", 29, 3782 },
+{ PROC_LINKS(vim_insert_prev, 0), false, "vim_insert_prev", 15, "Vim insert <c-p>: previous completion, opening the menu if needed.", 66, "../code/custom/4coder_vim.cpp", 29, 3788 },
+{ PROC_LINKS(vim_insert_register, 0), false, "vim_insert_register", 19, "Vim insert mode <c-r>{register}, inserts the contents of a register.", 68, "../code/custom/4coder_vim.cpp", 29, 3591 },
+{ PROC_LINKS(vim_insert_return, 0), false, "vim_insert_return", 17, "Insert <cr>: accepts the selected completion, otherwise breaks the line.", 72, "../code/custom/4coder_vim.cpp", 29, 3808 },
+{ PROC_LINKS(vim_insert_shift_tab, 0), false, "vim_insert_shift_tab", 20, "Insert <s-tab>: selects the previous completion.", 48, "../code/custom/4coder_vim.cpp", 29, 3817 },
+{ PROC_LINKS(vim_insert_tab, 0), false, "vim_insert_tab", 14, "Insert <tab>: selects the next completion, or jumps to the next snippet placeholder, otherwise types a tab.", 107, "../code/custom/4coder_vim.cpp", 29, 3828 },
+{ PROC_LINKS(vim_insert_text, 0), false, "vim_insert_text", 15, "Inserts typed text in vim insert mode and updates completion and signature help.", 80, "../code/custom/4coder_vim.cpp", 29, 3725 },
+{ PROC_LINKS(vim_insert_up, 0), false, "vim_insert_up", 13, "Selects the previous completion, or moves up a line.", 52, "../code/custom/4coder_vim.cpp", 29, 3761 },
+{ PROC_LINKS(vim_left, 0), false, "vim_left", 8, "Vim h motion.", 13, "../code/custom/4coder_vim.cpp", 29, 3390 },
+{ PROC_LINKS(vim_line_end_motion, 0), false, "vim_line_end_motion", 19, "Vim $ motion.", 13, "../code/custom/4coder_vim.cpp", 29, 3420 },
+{ PROC_LINKS(vim_line_start, 0), false, "vim_line_start", 14, "Vim 0 motion.", 13, "../code/custom/4coder_vim.cpp", 29, 3414 },
+{ PROC_LINKS(vim_normal_mode, 0), false, "vim_normal_mode", 15, "Leaves insert, replace or visual mode and returns to vim normal mode.", 69, "../code/custom/4coder_vim.cpp", 29, 3326 },
+{ PROC_LINKS(vim_redo, 0), false, "vim_redo", 8, "Vim <c-r>, redo.", 16, "../code/custom/4coder_vim.cpp", 29, 3443 },
+{ PROC_LINKS(vim_replace_text, 0), false, "vim_replace_text", 16, "Overwrites the character under the cursor with typed text in vim replace mode.", 78, "../code/custom/4coder_vim.cpp", 29, 3353 },
+{ PROC_LINKS(vim_return, 0), false, "vim_return", 10, "In read only buffers follows the jump under the cursor, otherwise moves to the next line.", 89, "../code/custom/4coder_vim.cpp", 29, 3364 },
+{ PROC_LINKS(vim_right, 0), false, "vim_right", 9, "Vim l motion.", 13, "../code/custom/4coder_vim.cpp", 29, 3396 },
+{ PROC_LINKS(vim_scroll_down_line, 0), false, "vim_scroll_down_line", 20, "Vim <c-e>, scrolls the view down one line.", 42, "../code/custom/4coder_vim.cpp", 29, 3461 },
+{ PROC_LINKS(vim_scroll_up_line, 0), false, "vim_scroll_up_line", 18, "Vim <c-y>, scrolls the view up one line.", 40, "../code/custom/4coder_vim.cpp", 29, 3467 },
+{ PROC_LINKS(vim_show_keys, 0), false, "vim_show_keys", 13, "Shows the list of keys (Space ? or :keys) in a read only *keys* buffer.", 71, "../code/custom/4coder_vim_keys.cpp", 34, 157 },
+{ PROC_LINKS(vim_up, 0), false, "vim_up", 6, "Vim k motion.", 13, "../code/custom/4coder_vim.cpp", 29, 3402 },
+{ PROC_LINKS(vim_visual_block_unsupported, 0), false, "vim_visual_block_unsupported", 28, "Placeholder for vim <c-v>, visual block mode is not implemented.", 64, "../code/custom/4coder_vim.cpp", 29, 3518 },
+{ PROC_LINKS(vim_window_command, 0), false, "vim_window_command", 18, "Vim <c-w> prefix for panel commands.", 36, "../code/custom/4coder_vim.cpp", 29, 3500 },
 { PROC_LINKS(word_complete, 0), false, "word_complete", 13, "Iteratively tries completing the word to the left of the cursor with other words in open buffers that have the same prefix string.", 130, "../code/custom/4coder_search.cpp", 32, 433 },
 { PROC_LINKS(word_complete_drop_down, 0), false, "word_complete_drop_down", 23, "Word complete with drop down menu.", 34, "../code/custom/4coder_search.cpp", 32, 679 },
 { PROC_LINKS(write_block, 0), false, "write_block", 11, "At the cursor, insert a block comment.", 38, "../code/custom/4coder_combined_write_commands.cpp", 49, 94 },
@@ -1086,18 +1088,19 @@ static i32 fcoder_metacmd_ID_vim_return = 341;
 static i32 fcoder_metacmd_ID_vim_right = 342;
 static i32 fcoder_metacmd_ID_vim_scroll_down_line = 343;
 static i32 fcoder_metacmd_ID_vim_scroll_up_line = 344;
-static i32 fcoder_metacmd_ID_vim_up = 345;
-static i32 fcoder_metacmd_ID_vim_visual_block_unsupported = 346;
-static i32 fcoder_metacmd_ID_vim_window_command = 347;
-static i32 fcoder_metacmd_ID_word_complete = 348;
-static i32 fcoder_metacmd_ID_word_complete_drop_down = 349;
-static i32 fcoder_metacmd_ID_write_block = 350;
-static i32 fcoder_metacmd_ID_write_hack = 351;
-static i32 fcoder_metacmd_ID_write_note = 352;
-static i32 fcoder_metacmd_ID_write_space = 353;
-static i32 fcoder_metacmd_ID_write_text_and_auto_indent = 354;
-static i32 fcoder_metacmd_ID_write_text_input = 355;
-static i32 fcoder_metacmd_ID_write_todo = 356;
-static i32 fcoder_metacmd_ID_write_underscore = 357;
-static i32 fcoder_metacmd_ID_write_zero_struct = 358;
+static i32 fcoder_metacmd_ID_vim_show_keys = 345;
+static i32 fcoder_metacmd_ID_vim_up = 346;
+static i32 fcoder_metacmd_ID_vim_visual_block_unsupported = 347;
+static i32 fcoder_metacmd_ID_vim_window_command = 348;
+static i32 fcoder_metacmd_ID_word_complete = 349;
+static i32 fcoder_metacmd_ID_word_complete_drop_down = 350;
+static i32 fcoder_metacmd_ID_write_block = 351;
+static i32 fcoder_metacmd_ID_write_hack = 352;
+static i32 fcoder_metacmd_ID_write_note = 353;
+static i32 fcoder_metacmd_ID_write_space = 354;
+static i32 fcoder_metacmd_ID_write_text_and_auto_indent = 355;
+static i32 fcoder_metacmd_ID_write_text_input = 356;
+static i32 fcoder_metacmd_ID_write_todo = 357;
+static i32 fcoder_metacmd_ID_write_underscore = 358;
+static i32 fcoder_metacmd_ID_write_zero_struct = 359;
 #endif

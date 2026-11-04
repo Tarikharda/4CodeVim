@@ -27,6 +27,7 @@
 #include "4coder_lsp.cpp"
 #include "4coder_git.cpp"
 #include "4coder_junit.cpp"
+#include "4coder_vim_keys.cpp"
 #include "4coder_vim.cpp"
 
 #if !defined(META_PASS)
