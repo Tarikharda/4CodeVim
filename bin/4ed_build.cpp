@@ -405,7 +405,7 @@ build(Arena *arena, u32 flags, u32 arch, char *code_path, char **code_files, cha
 "$(pkg-config --cflags freetype2)"
 
 #define CLANG_LIBS_COMMON \
-"-framework Cocoa -framework QuartzCore " \
+"-framework Cocoa -framework QuartzCore -framework Carbon " \
 "-framework CoreServices " \
 "-framework OpenGL -framework IOKit -framework Metal -framework MetalKit "
 

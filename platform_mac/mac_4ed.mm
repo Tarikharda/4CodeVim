@@ -200,6 +200,8 @@ struct Mac_Vars {
 
     String_Const_u8 binary_path;
 
+    UInt32 dead_key_state;
+
     u32 clipboard_change_count;
     b32 next_clipboard_is_self;
     b32 clip_catch_all;
@@ -967,39 +969,71 @@ mac_toggle_fullscreen(void){
 - (void)keyDown:(NSEvent*)event{
     // NOTE(yuval): Process keyboard event
     [self process_keyboard_event:event down:true];
-	[self interpretKeyEvents:[NSArray arrayWithObject:event]];
 
-    // TODO(allen): Deduplicate with insertText version
-    // NOTE(allen): We need to manually send text for '\n' and '\t'
+    // NOTE: Text, dead keys included, comes from the keyboard layout through UCKeyTranslate,
+    // with the dead key state kept here: Option-e then e is "é", ^ then e on French layouts
+    // is "ê". interpretKeyEvents dropped those compositions (there is no marked text), and
+    // Linux composes the same way through XIM. The dead key itself gets no text and is
+    // flagged like on Linux. Layouts without key layout data (input methods) fall back to
+    // the event's characters. Filtered like linux_filter_text: tab and newline stay, other
+    // control characters, delete and Apple's function key range (arrows, F keys) go.
+    UniChar buffer[16];
+    UniCharCount count = 0;
+    b32 have_text = false;
+    b32 is_dead = false;
     {
-        NSString *characters = [event characters];
-        u32 len = [characters length];
-        if (len == 1){
-            // NOTE(yuval): Get the first utf-16 character
-            u32 c = [characters characterAtIndex:0];
-            if (c == '\r'){
-                c = '\n';
-            }
-            if ((c == '\t') || (c == '\n')){
-                u8 *str = push_array(&mac_vars.frame_arena, u8, 1);
-	            str[0] = (u8)c;
-
-Input_Event *event = push_input_event(&mac_vars.frame_arena, &mac_vars.input_chunk.trans.event_list);
-                event->kind = InputEventKind_TextInsert;
-                event->text.string = SCu8(str, 1);
-                event->text.next_text = 0;
-                event->text.blocked = false;
-                if (mac_vars.active_text_input){
-                    mac_vars.active_text_input->text.next_text = event;
-                } else if (mac_vars.active_key_stroke){
-                    mac_vars.active_key_stroke->key.first_dependent_text = event;
-                }
-
-                mac_vars.active_text_input = event;
-
-                system_signal_step(0);
+        TISInputSourceRef source = TISCopyCurrentKeyboardLayoutInputSource();
+        CFDataRef layout_data = 0;
+        if (source != 0){
+            layout_data = (CFDataRef)TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData);
+        }
+        if (layout_data != 0){
+            NSEventModifierFlags flags = [event modifierFlags];
+            UInt32 carbon_mods = 0;
+            if (flags & NSEventModifierFlagShift)    carbon_mods |= shiftKey;
+            if (flags & NSEventModifierFlagCapsLock) carbon_mods |= alphaLock;
+            if (flags & NSEventModifierFlagOption)   carbon_mods |= optionKey;
+            if (flags & NSEventModifierFlagControl)  carbon_mods |= controlKey;
+            const UCKeyboardLayout *layout = (const UCKeyboardLayout*)CFDataGetBytePtr(layout_data);
+            OSStatus status = UCKeyTranslate(layout, [event keyCode],
+                                             [event isARepeat]?kUCKeyActionAutoKey:kUCKeyActionDown,
+                                             (carbon_mods >> 8) & 0xFF, LMGetKbdType(), 0,
+                                             &mac_vars.dead_key_state, ArrayCount(buffer), &count, buffer);
+            if (status == noErr){
+                have_text = true;
+                is_dead = (count == 0 && mac_vars.dead_key_state != 0);
             }
         }
+        if (source != 0){
+            CFRelease(source);
+        }
+    }
+    if (!have_text){
+        NSString *characters = [event characters];
+        count = Min((UniCharCount)[characters length], (UniCharCount)ArrayCount(buffer));
+        [characters getCharacters:buffer range:NSMakeRange(0, count)];
+    }
+    if (is_dead && mac_vars.active_key_stroke != 0){
+        mac_vars.active_key_stroke->key.flags |= KeyFlag_IsDeadKey;
+    }
+
+    unichar kept[16];
+    u32 kept_count = 0;
+    for (u32 i = 0; i < count; i += 1){
+        unichar c = buffer[i];
+        if (c == '\r'){
+            c = '\n';
+        }
+        b32 keep = ((c == '\t') || (c == '\n') ||
+                    (c >= ' ' && c != 0x7F && !(c >= 0xF700 && c <= 0xF8FF)));
+        if (keep){
+            kept[kept_count] = c;
+            kept_count += 1;
+        }
+    }
+    if (kept_count > 0){
+        NSString *text = [NSString stringWithCharacters:kept length:kept_count];
+        [self insertText:text replacementRange:NSMakeRange(NSNotFound, 0)];
     }
 }
 
@@ -1057,7 +1091,8 @@ Input_Event *event = push_input_event(&mac_vars.frame_arena, &mac_vars.input_chu
 
 - (void)insertText:(id)string
   replacementRange:(NSRange)replacementRange{
-  	NSString *text = (NSString*)string;
+    NSString *text = ([string isKindOfClass:[NSAttributedString class]]?
+                      [(NSAttributedString*)string string]:(NSString*)string);
 	u32 len = [text length];
 	Scratch_Block scratch(mac_vars.tctx);
 	u16 *utf16 = push_array(scratch, u16, len);
@@ -1517,6 +1552,17 @@ main(int arg_count, char **args){
         // NOTE(yuval): Display window and view
         [content_view addSubview:mac_vars.view];
         [mac_vars.window makeKeyAndOrderFront:nil];
+
+        // NOTE: NSApplication drops key up events while Command is held, so after Cmd-S the S
+        // key stayed down in 4coder's modifier set. Hand them to the view before that happens
+        // (Linux gets these releases from X11).
+        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyUp handler:^NSEvent*(NSEvent *event){
+            if (([event modifierFlags] & NSEventModifierFlagCommand) != 0){
+                [mac_vars.view keyUp:event];
+                return(nil);
+            }
+            return(event);
+        }];
 
         // NOTE(yuval): Initialize the renderer
         renderer = mac_init_renderer(MacRenderer_Metal, mac_vars.window, &target);

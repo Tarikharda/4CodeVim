@@ -185,22 +185,22 @@ function void
 block_fill_ones(String_Const_u8 data){
     block_fill_ones(data.str, data.size);
 }
+// NOTE: Indices, not end pointers: the backward copy used to start at d + size - 1, which
+// for an empty copy (often with a null src) points before the buffer. clang -O3 assumes
+// that cannot happen, ran the loop once and crashed reading 0xffffffffffffffff, so the
+// optimized macOS build died at startup (gcc on Linux happened to keep the check).
 function void
 block_copy(void *dst, const void *src, u64 size){
     u8 *d = (u8*)dst;
     u8 *s = (u8*)src;
     if (d < s){
-        u8 *e = d + size;
-        for (; d < e; d += 1, s += 1){
-            *d = *s;
+        for (u64 i = 0; i < size; i += 1){
+            d[i] = s[i];
         }
     }
     else if (d > s){
-        u8 *e = d;
-        d += size - 1;
-        s += size - 1;
-        for (; d >= e; d -= 1, s -= 1){
-            *d = *s;
+        for (u64 i = size; i > 0; i -= 1){
+            d[i - 1] = s[i - 1];
         }
     }
 }

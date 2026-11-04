@@ -4,8 +4,9 @@
 
 ////////////////////////////////
 
-// NOTE: The Metal view sits on top of FCoder_View, so clicks and the scroll wheel went to it
-// (and from it to the content view) instead of to 4coder. Hit testing passes through it.
+// NOTE: The Metal view sits on top of FCoder_View. Mouse events reached 4coder anyway (the
+// window hands what the Metal view ignores to its first responder), but hit testing through
+// it delivers them to FCoder_View directly.
 @interface FCoder_Metal_View : MTKView
 @end
 

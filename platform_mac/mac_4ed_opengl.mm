@@ -52,7 +52,7 @@ struct Mac_OpenGL{
     [super dealloc];
 }
 
-// NOTE: Like the Metal view, let clicks and the scroll wheel through to FCoder_View.
+// NOTE: Like the Metal view, hit testing goes through to FCoder_View.
 - (NSView*)hitTest:(NSPoint)point{
     return(nil);
 }
