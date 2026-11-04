@@ -52,6 +52,11 @@ struct Mac_OpenGL{
     [super dealloc];
 }
 
+// NOTE: Like the Metal view, let clicks and the scroll wheel through to FCoder_View.
+- (NSView*)hitTest:(NSPoint)point{
+    return(nil);
+}
+
 - (void)prepareOpenGL{
     [super prepareOpenGL];
     
@@ -124,10 +129,6 @@ struct Mac_OpenGL{
 
 function
 mac_render_sig(mac_gl__render){
-#if defined(FRED_INTERNAL)
-    printf("Redering using OpenGL!\n");
-#endif
-    
     Mac_OpenGL *gl = (Mac_OpenGL*)renderer;
     [gl->view render:target];
 }

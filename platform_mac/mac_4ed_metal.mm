@@ -4,6 +4,19 @@
 
 ////////////////////////////////
 
+// NOTE: The Metal view sits on top of FCoder_View, so clicks and the scroll wheel went to it
+// (and from it to the content view) instead of to 4coder. Hit testing passes through it.
+@interface FCoder_Metal_View : MTKView
+@end
+
+@implementation FCoder_Metal_View
+- (NSView*)hitTest:(NSPoint)point{
+    return(nil);
+}
+@end
+
+////////////////////////////////
+
 struct Mac_Metal{
     Mac_Renderer base;
 
@@ -15,10 +28,6 @@ struct Mac_Metal{
 
 function
 mac_render_sig(mac_metal__render){
-#if defined(FRED_INTERNAL)
-    printf("Redering using Metal!\n");
-#endif
-
     Mac_Metal *metal = (Mac_Metal*)renderer;
     [metal->view draw];
 }
@@ -56,7 +65,7 @@ mac_metal__init(NSWindow *window, Render_Target *target){
     // NOTE(yuval): Create the Metal view
     NSView *content_view = [window contentView];
 
-    metal->view = [[MTKView alloc] initWithFrame:[content_view bounds]];
+    metal->view = [[FCoder_Metal_View alloc] initWithFrame:[content_view bounds]];
     [metal->view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
     [metal->view setPaused:YES];
     [metal->view setEnableSetNeedsDisplay:NO];

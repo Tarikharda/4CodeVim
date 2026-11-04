@@ -16,9 +16,14 @@ system_get_path_sig(){
             char *working_dir = getcwd(NULL, 0);
             u64 working_dir_length = cstring_length(working_dir);
 
-            // TODO(yuval): Maybe use push_string_copy instead
-            u8 *out = push_array(arena, u8, working_dir_length);
+            // NOTE: With the trailing slash the core and the custom layer expect, as on Linux
+            // (without it Space E opened the folder minus its last letter).
+            u8 *out = push_array(arena, u8, working_dir_length + 1);
             block_copy(out, working_dir, working_dir_length);
+            if (working_dir_length == 0 || out[working_dir_length - 1] != '/'){
+                out[working_dir_length] = '/';
+                working_dir_length += 1;
+            }
 
             free(working_dir);
 
@@ -48,9 +53,14 @@ system_get_path_sig(){
 
         case SystemPath_UserDirectory:
         {
-            char *home_cstr = getenv("HOME");
-            if (home_cstr != 0){
-                result = push_u8_stringf(arena, "%s/.4coder/", home_cstr);
+            if (mac_override_user_directory == 0){
+                char *home_cstr = getenv("HOME");
+                if (home_cstr != 0){
+                    result = push_u8_stringf(arena, "%s/.4coder/", home_cstr);
+                }
+            }
+            else{
+                result = SCu8((u8*)mac_override_user_directory);
             }
         }break;
     }
@@ -111,6 +121,20 @@ mac_file_attributes_from_fd(i32 fd) {
     }
 
     return(result);
+}
+
+// NOTE: Same order as Linux: hidden files last, then by name. The file browser shows the list
+// as it comes, and APFS does not return names sorted.
+function int
+mac_compare_file_infos(const void *a_ptr, const void *b_ptr){
+    File_Info *a = *(File_Info**)a_ptr;
+    File_Info *b = *(File_Info**)b_ptr;
+    b32 a_hidden = (a->file_name.str[0] == '.');
+    b32 b_hidden = (b->file_name.str[0] == '.');
+    if (a_hidden != b_hidden){
+        return(a_hidden - b_hidden);
+    }
+    return(strcoll((char*)a->file_name.str, (char*)b->file_name.str));
 }
 
 function
@@ -187,6 +211,14 @@ system_get_file_list_sig(){
              node = node->next){
             result.infos[index] = node;
             index += 1;
+        }
+
+        if (count > 1){
+            qsort(result.infos, count, sizeof(File_Info*), mac_compare_file_infos);
+            for (i32 i = 0; i < count - 1; i += 1){
+                result.infos[i]->next = result.infos[i + 1];
+            }
+            result.infos[count - 1]->next = 0;
         }
     }
 
@@ -279,7 +311,9 @@ function
 system_save_file_sig(){
     File_Attributes result = {};
 
-    i32 fd = open(file_name, O_WRONLY | O_TRUNC | O_CREAT, 00640);
+    // NOTE: 0666 and the umask, like Linux and other editors (new files were not readable by
+    // the group or others).
+    i32 fd = open(file_name, O_WRONLY | O_TRUNC | O_CREAT, 0666);
     if (fd != -1) {
         do{
             ssize_t bytes_written = write(fd, data.str, data.size);
@@ -597,8 +631,9 @@ system_cli_end_update_sig(){
     if (pid && (waitpid(pid, &status, WNOHANG) > 0)){
         cli->exit = WEXITSTATUS(status);
 
+        // NOTE: out_write was closed in system_cli_call; closing it again here could close
+        // whatever file reused that number since (the jdtls socket, a git pipe).
         close(*(int*)&cli->out_read);
-        close(*(int*)&cli->out_write);
 
         mac_vars.running_cli -= 1;
 
@@ -612,7 +647,7 @@ system_cli_end_update_sig(){
 
 function
 system_open_color_picker_sig(){
-    NotImplemented;
+    // NOTE: Not available on Linux either; an assert here would stop dev builds.
 }
 
 function

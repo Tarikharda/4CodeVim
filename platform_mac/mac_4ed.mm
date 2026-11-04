@@ -187,6 +187,8 @@ struct Mac_Vars {
 
     b8 full_screen;
     b8 do_toggle;
+    b8 app_initialized;
+    f32 wheel_remainder;
     b32 send_exit_signal;
 
     i32 cursor_show;
@@ -236,6 +238,7 @@ struct Mac_Vars {
 ////////////////////////////////
 
 global Mac_Vars mac_vars;
+global char *mac_override_user_directory = 0;
 global Mac_Renderer *renderer;
 global Render_Target target;
 global App_Functions app;
@@ -345,7 +348,9 @@ os_popup_error(char *title, char *message){
 
 ////////////////////////////////
 
-#if defined(FRED_INTERNAL)
+// NOTE: Per frame timings on stdout; build with -DMAC_PROFILE to get them (dev builds used to
+// print them every frame).
+#if defined(MAC_PROFILE)
 function inline void
 mac_profile(char *name, u64 begin, u64 end){
     printf("%s Time: %fs\n", name, ((end - begin) / 1000000.0f));
@@ -438,6 +443,7 @@ mac_keycode_init(void){
 
     keycode_lookup_table[kVK_Delete] = KeyCode_Backspace;
     keycode_lookup_table[kVK_Return] = KeyCode_Return;
+    keycode_lookup_table[kVK_ANSI_KeypadEnter] = KeyCode_Return;
 
     keycode_lookup_table[kVK_ForwardDelete] = KeyCode_Delete;
     //keycode_lookup_table[] = KeyCode_Insert; // TODO(yuval): Figure how to get keyDown events for the insert key
@@ -497,14 +503,6 @@ mac_keycode_init(void){
     keycode_lookup_table[kVK_ANSI_KeypadMinus] = KeyCode_NumPadMinus;
     keycode_lookup_table[kVK_ANSI_KeypadDecimal] = KeyCode_NumPadDot;
     keycode_lookup_table[kVK_ANSI_KeypadDivide] = KeyCode_NumPadSlash;
-}
-
-////////////////////////////////
-
-function b32
-mac_file_can_be_made(u8* filename){
-    b32 result = access((char*)filename, W_OK) == 0;
-    return(result);
 }
 
 ////////////////////////////////
@@ -663,6 +661,18 @@ mac_toggle_fullscreen(void){
     }
 }
 
+// NOTE: Keep full_screen in sync however the window got there (the menu, the green button,
+// or 4coder's toggle_fullscreen), so system_is_fullscreen tells the truth.
+- (void)windowDidEnterFullScreen:(NSNotification*)notification{
+    mac_vars.full_screen = true;
+    system_signal_step(0);
+}
+
+- (void)windowDidExitFullScreen:(NSNotification*)notification{
+    mac_vars.full_screen = false;
+    system_signal_step(0);
+}
+
 - (void)windowDidMiniaturize:(NSNotification*)notification{
 }
 
@@ -711,7 +721,13 @@ mac_toggle_fullscreen(void){
 }
 
 - (void)updateLayer{
-    u64 prev_timer_start;
+    // NOTE: An error box shown during startup spins the run loop, which asks for a frame
+    // before the core is initialized.
+    if (!mac_vars.app_initialized){
+        return;
+    }
+
+    u64 prev_timer_start = mac_vars.timer_start;
 
     MacProfileScope("Draw Rect"){
         mac_vars.step_requested = false;
@@ -908,7 +924,7 @@ mac_toggle_fullscreen(void){
     }
 
     mac_profile("Frame", prev_timer_start, mac_vars.timer_start);
-#if FRED_INTERNAL
+#if defined(MAC_PROFILE)
     printf("\n");
 #endif
 }
@@ -921,6 +937,11 @@ mac_toggle_fullscreen(void){
 // only key combos??
 #if 1
 - (BOOL)performKeyEquivalent:(NSEvent *)event{
+    // NOTE: Views get key equivalents before the main menu, so the menu's own shortcuts
+    // (Cmd-H, Cmd-M, Ctrl-Cmd-F, Cmd-Q) never fired while this returned YES for everything.
+    if ([event type] == NSEventTypeKeyDown && [[NSApp mainMenu] performKeyEquivalent:event]){
+        return(YES);
+    }
     [self process_keyboard_event:event down:true];
     return(YES);
 }
@@ -1105,15 +1126,16 @@ Input_Event *event = push_input_event(&mac_vars.frame_arena, &mac_vars.input_chu
 - (void)scrollWheel:(NSEvent *)event{
     f32 dy = event.scrollingDeltaY;
     if ([event hasPreciseScrollingDeltas]){
-        mac_vars.input_chunk.trans.mouse_wheel = (i32)(-dy);
+        // NOTE: Trackpads send many small deltas in points per frame: add them up in
+        // backing pixels (the units 4coder scrolls in) and keep the fraction for the next one.
+        f32 pixels = -dy*(f32)[mac_vars.window backingScaleFactor] + mac_vars.wheel_remainder;
+        i32 whole = (i32)pixels;
+        mac_vars.wheel_remainder = pixels - (f32)whole;
+        mac_vars.input_chunk.trans.mouse_wheel += whole;
     }
-    else{
-        if (dy > 0){
-            mac_vars.input_chunk.trans.mouse_wheel = -100;
-        }
-        else{
-            mac_vars.input_chunk.trans.mouse_wheel = 100;
-        }
+    else if (dy != 0){
+        // NOTE: One mouse wheel notch scrolls as far as on Linux.
+        mac_vars.input_chunk.trans.mouse_wheel += (dy > 0)?-100:100;
     }
     system_signal_step(0);
 }
@@ -1374,18 +1396,14 @@ main(int arg_count, char **args){
             curdir = string_mod_replace_character(curdir, '\\', '/');
             char **files = 0;
             i32 *file_count = 0;
+            // NOTE: Like Linux, every file named on the command line opens, including new and
+            // read only ones (a W_OK check used to drop them).
             mac_vars.base_ptr = app.read_command_line(mac_vars.tctx, curdir, &plat_settings, &files, &file_count, arg_count, args);
-            {
-                i32 end = *file_count;
-                i32 i = 0, j = 0;
-                for (; i < end; ++i){
-                    if (mac_file_can_be_made((u8*)files[i])){
-                        files[j] = files[i];
-                        ++j;
-                    }
-                }
-                *file_count = j;
-            }
+        }
+
+        // NOTE: -U <dir> replaces ~/.4coder/ as the user directory, as on Linux.
+        if (plat_settings.user_directory != 0){
+            mac_override_user_directory = plat_settings.user_directory;
         }
 
         // NOTE(yuval): Load custom layer
@@ -1462,6 +1480,8 @@ main(int arg_count, char **args){
 
         u32 style_mask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
 
+        mac_vars.global_frame_mutex = system_mutex_make();
+
         mac_vars.window = [[NSWindow alloc] initWithContentRect:initial_frame
                            styleMask:style_mask
                            backing:NSBackingStoreBuffered
@@ -1482,6 +1502,17 @@ main(int arg_count, char **args){
         [mac_vars.view setFrame:[content_view bounds]];
         [mac_vars.view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
         mac_vars.view.wantsLayer = true;
+
+        // NOTE: -p x y and -W (maximize), as on Linux. Cocoa's origin is the bottom left corner
+        // of the main screen, X11's the top left.
+        if (plat_settings.set_window_pos){
+            NSPoint top_left = NSMakePoint(screen_rect.origin.x + plat_settings.window_x,
+                                           screen_rect.origin.y + screen_rect.size.height - plat_settings.window_y);
+            [mac_vars.window setFrameTopLeftPoint:top_left];
+        }
+        if (plat_settings.maximize_window){
+            [mac_vars.window setFrame:[[NSScreen mainScreen] visibleFrame] display:NO];
+        }
 
         // NOTE(yuval): Display window and view
         [content_view addSubview:mac_vars.view];
@@ -1537,6 +1568,7 @@ main(int arg_count, char **args){
             curdir = string_mod_replace_character(curdir, '\\', '/');
             app.init(mac_vars.tctx, &target, mac_vars.base_ptr, curdir, custom);
         }
+        mac_vars.app_initialized = true;
 
         //
         // Start Main Loop
@@ -1549,8 +1581,6 @@ main(int arg_count, char **args){
         if (plat_settings.fullscreen_window){
             mac_vars.do_toggle = true;
         }
-
-        mac_vars.global_frame_mutex = system_mutex_make();
 
         mac_vars.timer_start = system_now_time();
 

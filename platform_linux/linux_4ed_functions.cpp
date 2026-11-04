@@ -504,8 +504,9 @@ system_cli_end_update(CLI_Handles* cli){
         cli->exit = WEXITSTATUS(status);
         
         close_me = true;
+        // NOTE: out_write was closed in system_cli_call; closing it again here could close
+        // whatever file reused that number since (the jdtls socket, a git pipe).
         close(*(int*)&cli->out_read);
-        close(*(int*)&cli->out_write);
     }
     
     return(close_me);
